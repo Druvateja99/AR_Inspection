@@ -1,0 +1,167 @@
+
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.XR.ARFoundation;
+using UnityEngine.XR.ARSubsystems;
+using UnityEngine.EventSystems;
+
+/// <summary>
+/// Loads a CAD model at runtime, makes it transparent for AR overlay,
+/// and lets the user place/adjust it in the real world.
+/// Keep your UI/checklist script separate.
+/// </summary>
+public class ARModelLoader : MonoBehaviour
+{
+    [Header("AR Managers (assign from scene)")]
+    public XROrigin xrOrigin;
+    public ARRaycastManager raycastManager;
+    public ARPlaneManager planeManager;        // optional (for visualizing planes)
+    public ARCameraManager arCameraManager;    // optional (camera control)
+
+    [Header("Model Loading")]
+    public Transform modelParent;              // e.g., XROrigin.transform; where model will attach
+    public Material transparentMaterial;       // set Rendering Mode=Transparent, alpha ~0.3–0.6
+    public GameObject currentModel;            // the loaded instance (runtime)
+
+    [Header("Placement & Alignment")]
+    public bool tapToPlaceEnabled = true;
+    public float rotateSpeed = 40f;            // degrees/sec
+    public float scaleStep = 0.02f;            // per tap
+
+    // Internal
+    private static List<ARRaycastHit> s_Hits = new List<ARRaycastHit>();
+    private Camera arCamera;
+
+    void Awake()
+    {
+        if (xrOrigin == null) xrOrigin = FindObjectOfType<XROrigin>();
+        if (raycastManager == null) raycastManager = FindObjectOfType<ARRaycastManager>();
+        if (planeManager == null) planeManager = FindObjectOfType<ARPlaneManager>();
+        if (arCameraManager == null) arCameraManager = FindObjectOfType<ARCameraManager>();
+
+        arCamera = xrOrigin != null ? xrOrigin.Camera : Camera.main;
+        if (modelParent == null && xrOrigin != null) modelParent = xrOrigin.transform;
+    }
+
+    void Update()
+    {
+        // Optional: skip if no model yet
+        if (currentModel == null) return;
+
+        // Tap-to-place on planes
+        if (tapToPlaceEnabled && Input.touchCount > 0)
+        {
+            var touch = Input.GetTouch(0);
+            if (touch.phase == TouchPhase.Began && !IsPointerOverUI(touch.position))
+            {
+                TryPlaceAt(touch.position);
+            }
+        }
+
+        // Simple keyboard controls for dev in Editor
+#if UNITY_EDITOR
+        if (Input.GetKey(KeyCode.Q)) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime, Space.World);
+        if (Input.GetKey(KeyCode.E)) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime, Space.World);
+#endif
+    }
+
+    /// <summary>
+    /// Call this after your user picks a CAD asset (already converted to FBX/GLTF and present in project or Addressables).
+    /// If you use Addressables/AssetBundles, load that prefab then pass to this method.
+    /// </summary>
+    public void LoadModelPrefab(GameObject modelPrefab)
+    {
+        // Destroy previous
+        if (currentModel != null) Destroy(currentModel);
+
+        // Instantiate under XROrigin (or a dedicated anchor parent)
+        currentModel = Instantiate(modelPrefab, modelParent);
+        currentModel.transform.localPosition = Vector3.zero;
+        currentModel.transform.localRotation = Quaternion.identity;
+        currentModel.transform.localScale   = Vector3.one;
+
+        // Apply transparent material to all renderers
+        ApplyTransparentMaterial(currentModel);
+
+        // Optional: start hidden until placed
+        // currentModel.SetActive(false);
+    }
+
+    /// <summary>
+    /// If you prefer to load by Resources path (simple demo).
+    /// E.g., put your GLTF/FBX prefab under Assets/Resources/CADModels/ and call with "CADModels/YourPrefabName"
+    /// </summary>
+    public void LoadFromResources(string resourcesPath)
+    {
+        var prefab = Resources.Load<GameObject>(resourcesPath);
+        if (prefab == null)
+        {
+            Debug.LogError($"Resources.Load failed: {resourcesPath}");
+            return;
+        }
+        LoadModelPrefab(prefab);
+    }
+
+    /// <summary>
+    /// Tap-to-place using ARRaycastManager.
+    /// </summary>
+    public void TryPlaceAt(Vector2 screenPos)
+    {
+        if (raycastManager == null || arCamera == null) return;
+        s_Hits.Clear();
+
+        if (raycastManager.Raycast(screenPos, s_Hits, TrackableType.PlaneWithinPolygon))
+        {
+            var hitPose = s_Hits[0].pose;
+            currentModel.transform.position = hitPose.position;
+            currentModel.transform.rotation = hitPose.rotation;
+
+            // Now visible if you initially hid it
+            // currentModel.SetActive(true);
+        }
+    }
+
+    /// <summary>
+    /// UI hook: Rotate left/right by buttons.
+    /// </summary>
+    public void RotateLeft()  { if (currentModel) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime * 10f, Space.World); }
+    public void RotateRight() { if (currentModel) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime * 10f, Space.World); }
+
+    /// <summary>
+    /// UI hook: Scale up/down by buttons.
+    /// </summary>
+    public void ScaleUp()   { if (currentModel) currentModel.transform.localScale += Vector3.one * scaleStep; }
+    public void ScaleDown() { if (currentModel) currentModel.transform.localScale  = Vector3.Max(currentModel.transform.localScale - Vector3.one * scaleStep, Vector3.one * 0.01f); }
+
+    /// <summary>
+    /// True if finger is over UGUI element, so we don't raycast the scene.
+    /// </summary>
+    private bool IsPointerOverUI(Vector2 screenPos)
+    {
+        var ed = new PointerEventData(EventSystem.current) { position = screenPos };
+        var results = new List<RaycastResult>();
+        EventSystem.current.RaycastAll(ed, results);
+        return results.Count > 0;
+    }
+
+    private void ApplyTransparentMaterial(GameObject go)
+    {
+        if (transparentMaterial == null)
+        {
+            Debug.LogWarning("Transparent material not assigned. Using default materials.");
+            return;
+        }
+
+        var renderers = go.GetComponentsInChildren<Renderer>(true);
+        foreach (var r in renderers)
+        {
+            // Clone the material so alpha changes don’t affect the shared asset
+            var mats = r.sharedMaterials;
+            for (int i = 0; i < mats.Length; i++)
+            {
+                mats[i] = new Material(transparentMaterial);
+            }
+            r.sharedMaterials = mats;
+        }
+    }
+}
