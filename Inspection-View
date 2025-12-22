@@ -1,0 +1,1988 @@
+
+// Assets/Scripts/Auth/InspectionARApp_TWYN_JD_UGUI.cs
+// Unity 6.3 LTS (6000.3.x) - UGUI only, no TextMeshPro.
+// TWYN-style industrial UI + John Deere green theme.
+// Screens: Login → Home → Model Options → Checklist → Align (placeholder) → Inspection → Report.
+// CAD/AR integration intentionally stubbed; plug in later without changing UI architecture.
+
+using System;
+using System.IO;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.UI;
+using UnityEngine.EventSystems;
+
+#if UNITY_EDITOR
+using UnityEditor; // Editor file picker (runtime picker is stubbed)
+#endif
+
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem.UI;
+#endif
+
+public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
+{
+    // ===== Dev/testing switches =====
+    [Header("Dev Options")]
+    [SerializeField] private bool forceLoginOnStart = false; // set true if you always want Login screen on Play
+    [SerializeField] private bool clearLoginPrefsOnPlay = false; // wipe stored login each Play
+
+    // ------------------------------------------------------------
+    // Data Models
+    // ------------------------------------------------------------
+    [Serializable] public class ModelEntry
+    {
+        public string id;
+        public string displayName;
+        public string sourcePath;
+        public string lastUsed;
+    }
+
+    [Serializable] public class ModelHistory { public List<ModelEntry> models = new List<ModelEntry>(); }
+
+    [Serializable] public class InspectionPoint
+    {
+        public string id;
+        public string name;
+        public string instruction;
+        public string tolerance;
+    }
+
+    [Serializable] public class ChecklistTemplate
+    {
+        public string modelId;
+        public string templateName;
+        public List<InspectionPoint> points = new List<InspectionPoint>();
+        public string updatedOn;
+    }
+
+    [Serializable] public class TemplateStore { public List<ChecklistTemplate> templates = new List<ChecklistTemplate>(); }
+
+    public enum StepStatus { NotDone, Pass, Fail }
+
+    [Serializable] public class EvidencePhoto
+    {
+        public string filePath;
+        public string takenAt;
+    }
+
+    [Serializable] public class StepResult
+    {
+        public string pointId;
+        public StepStatus status;
+        public string notes;
+        public List<EvidencePhoto> photos = new List<EvidencePhoto>();
+    }
+
+    [Serializable] public class InspectionRun
+    {
+        public string runId;
+        public string modelId;
+        public string modelName;
+        public string operatorName;
+        public string startedAt;
+        public string finishedAt;
+        public List<StepResult> results = new List<StepResult>();
+    }
+
+    [Serializable] public class RunStore { public List<InspectionRun> runs = new List<InspectionRun>(); }
+
+    // ------------------------------------------------------------
+    // Persistence
+    // ------------------------------------------------------------
+    static class Persist
+    {
+        static string Root => Application.persistentDataPath;
+        static string HistoryPath => Path.Combine(Root, "model_history.json");
+        static string TemplatesPath => Path.Combine(Root, "checklist_templates.json");
+        static string RunsPath => Path.Combine(Root, "inspection_runs.json");
+        static string EvidenceDir => Path.Combine(Root, "evidence");
+
+        public static void EnsureDirs()
+        {
+            if (!Directory.Exists(Root)) Directory.CreateDirectory(Root);
+            if (!Directory.Exists(EvidenceDir)) Directory.CreateDirectory(EvidenceDir);
+        }
+
+        static T Load<T>(string path) where T : new()
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    var json = File.ReadAllText(path);
+                    var obj = JsonUtility.FromJson<T>(json);
+                    return obj != null ? obj : new T();
+                }
+            }
+            catch (Exception e) { Debug.LogError($"Load error ({path}): {e.Message}"); }
+            return new T();
+        }
+
+        static void Save<T>(string path, T obj)
+        {
+            try
+            {
+                var json = JsonUtility.ToJson(obj, true);
+                File.WriteAllText(path, json);
+            }
+            catch (Exception e) { Debug.LogError($"Save error ({path}): {e.Message}"); }
+        }
+
+        public static ModelHistory LoadHistory() => Load<ModelHistory>(HistoryPath);
+        public static void SaveHistory(ModelHistory h) => Save(HistoryPath, h);
+
+        public static TemplateStore LoadTemplates() => Load<TemplateStore>(TemplatesPath);
+        public static void SaveTemplates(TemplateStore t) => Save(TemplatesPath, t);
+
+        public static RunStore LoadRuns() => Load<RunStore>(RunsPath);
+        public static void SaveRuns(RunStore r) => Save(RunsPath, r);
+
+        public static void UpsertModel(ModelEntry m)
+        {
+            var hist = LoadHistory();
+            var ex = hist.models.Find(x => x.id == m.id);
+            if (ex == null) hist.models.Add(m);
+            else
+            {
+                ex.displayName = m.displayName;
+                ex.sourcePath = m.sourcePath;
+                ex.lastUsed = m.lastUsed;
+            }
+            SaveHistory(hist);
+        }
+
+        public static ChecklistTemplate GetOrCreateTemplate(string modelId, string defaultName = "Default Checklist")
+        {
+            var store = LoadTemplates();
+            var t = store.templates.Find(x => x.modelId == modelId);
+            if (t == null)
+            {
+                t = new ChecklistTemplate
+                {
+                    modelId = modelId,
+                    templateName = defaultName,
+                    updatedOn = Now()
+                };
+                store.templates.Add(t);
+                SaveTemplates(store);
+            }
+            return t;
+        }
+
+        public static void UpsertTemplate(ChecklistTemplate template)
+        {
+            template.updatedOn = Now();
+            var store = LoadTemplates();
+            var ex = store.templates.Find(x => x.modelId == template.modelId);
+            if (ex == null) store.templates.Add(template);
+            else
+            {
+                ex.templateName = template.templateName;
+                ex.points = template.points;
+                ex.updatedOn = template.updatedOn;
+            }
+            SaveTemplates(store);
+        }
+
+        public static void AddRun(InspectionRun run)
+        {
+            var store = LoadRuns();
+            store.runs.Add(run);
+            SaveRuns(store);
+        }
+
+        public static string Now() => DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+        public static string NewId(string prefix) => $"{prefix}_{Guid.NewGuid():N}";
+
+        public static string EvidencePathFor(string runId, int stepIndex)
+        {
+            EnsureDirs();
+            var fn = $"photo_{runId}_step{stepIndex + 1}_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+            return Path.Combine(EvidenceDir, fn);
+        }
+    }
+
+    // ------------------------------------------------------------
+    // UI / Navigation State
+    // ------------------------------------------------------------
+    enum ScreenId { Login, Home, ModelOptions, Checklist, Align, Inspection, Report }
+
+    ModelEntry _selectedModel;
+    ChecklistTemplate _selectedTemplate;
+    InspectionRun _activeRun;
+    int _activeStepIndex;
+
+    Stack<ScreenId> _backStack = new Stack<ScreenId>();
+
+    // ------------------------------------------------------------
+    // UI Root
+    // ------------------------------------------------------------
+    Canvas _canvas;
+    RectTransform _root;
+    RectTransform _safeArea;
+
+    // Screens
+    GameObject _loginPanel, _homePanel, _modelOptionsPanel, _checklistPanel, _alignPanel, _inspectionPanel, _reportPanel;
+
+    // overlays
+    GameObject _toastGO;
+    Text _toastText;
+    CanvasGroup _toastGroup;
+
+    GameObject _modalBlocker;
+    Text _modalTitle, _modalBody;
+    Button _modalPrimary, _modalSecondary;
+
+    // Login
+    InputField _loginUser, _loginPass;
+    Text _loginError;
+
+    // Home
+    Text _homeWelcome;
+    Transform _historyContent;
+
+    // Model options
+    Text _modelHeader, _modelSub;
+
+    // Checklist
+    InputField _templateNameInput;
+    Transform _pointsContent;
+    Text _pointsCountText;
+
+    // Align
+    Text _alignModelName;
+    Toggle _alignConfirmedToggle;
+
+    // Inspection
+    Text _inspectTitle, _inspectProgress, _inspectPointName, _inspectInstruction;
+    InputField _inspectNotes;
+    Button _inspectPassBtn, _inspectFailBtn, _inspectClearBtn;
+    Button _inspectPrevBtn, _inspectNextBtn, _inspectPhotoBtn, _inspectFinishBtn;
+    Text _inspectPhotoCount;
+    RawImage _inspectPhotoPreview;
+    Texture2D _previewTex;
+    Transform _stepDrawerContent;
+
+    // Report
+    Text _reportHeader;
+    Transform _reportResultsContent;
+
+    // ------------------------------------------------------------
+    // TWYN / JD Theme
+    // ------------------------------------------------------------
+    Font _font;
+
+    Color C_BG      => Hex("#0F1213");
+    Color C_CARD    => Hex("#151A1C");
+    Color C_BORDER  => Hex("#263034");
+    Color C_TEXT    => Hex("#EAF0EE");
+    Color C_SUB     => Hex("#AEB7B2");
+    Color C_MUTED   => Hex("#6E7A74");
+    Color C_HEADER  => Hex("#0E1510");
+    Color C_PRIMARY => Hex("#367C2B"); // John Deere green
+    Color C_ACCENT  => Hex("#FFDE00"); // JD yellow
+    Color C_SUCCESS => Hex("#2E7D32");
+    Color C_DANGER  => Hex("#D7263D");
+    Color C_WARN    => Hex("#FFB020");
+
+    static Color Hex(string hex)
+    {
+        if (ColorUtility.TryParseHtmlString(hex, out var c)) return c;
+        return Color.white;
+    }
+
+    void Start()
+    {
+        Persist.EnsureDirs();
+
+        if (clearLoginPrefsOnPlay)
+        {
+            PlayerPrefs.SetInt("is_logged_in", 0);
+            PlayerPrefs.DeleteKey("user_name");
+            PlayerPrefs.Save();
+        }
+
+        // Unity 6: use LegacyRuntime.ttf for built-in font
+        _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+
+        BuildCanvas();
+        BuildCommonOverlays();
+
+        BuildLoginScreen();
+        BuildHomeScreen();
+        BuildModelOptionsScreen();
+        BuildChecklistScreen();
+        BuildAlignScreen();
+        BuildInspectionScreen();
+        BuildReportScreen();
+
+        // Ensure overlay draws above screens
+        BringOverlaysToFront();
+
+        if (!forceLoginOnStart && PlayerPrefs.GetInt("is_logged_in", 0) == 1)
+            NavigateTo(ScreenId.Home, clearStack: true);
+        else
+            NavigateTo(ScreenId.Login, clearStack: true);
+    }
+
+    void Update()
+    {
+        if (_safeArea == null) return;
+        ApplySafeArea();
+    }
+
+    // ------------------------------------------------------------
+    // Canvas & Safe Area
+    // ------------------------------------------------------------
+    Rect _lastSafeRect;
+
+    void BuildCanvas()
+    {
+        var canvasGO = new GameObject("Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
+        _canvas = canvasGO.GetComponent<Canvas>();
+        _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+
+        var scaler = canvasGO.GetComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1366, 768);
+        scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
+        scaler.matchWidthOrHeight = 0.5f;
+
+        _root = canvasGO.GetComponent<RectTransform>();
+        Stretch(_root);
+
+        var safeGO = new GameObject("SafeArea", typeof(RectTransform));
+        safeGO.transform.SetParent(_root, false);
+        _safeArea = safeGO.GetComponent<RectTransform>();
+        Stretch(_safeArea);
+
+        // EventSystem (Unity 6)
+        var es = UnityEngine.Object.FindAnyObjectByType<EventSystem>();
+        if (es == null)
+        {
+            var esGO = new GameObject("EventSystem", typeof(EventSystem));
+#if ENABLE_INPUT_SYSTEM
+            esGO.AddComponent<InputSystemUIInputModule>();
+#else
+            esGO.AddComponent<StandaloneInputModule>();
+#endif
+        }
+
+        var bg = CreatePanel(_safeArea, "BG", C_BG);
+        bg.GetComponent<Image>().raycastTarget = false;
+    }
+
+    void ApplySafeArea()
+    {
+        var sr = Screen.safeArea;
+        if (sr == _lastSafeRect) return;
+        _lastSafeRect = sr;
+
+        Vector2 anchorMin = sr.position;
+        Vector2 anchorMax = sr.position + sr.size;
+        anchorMin.x /= Screen.width; anchorMin.y /= Screen.height;
+        anchorMax.x /= Screen.width; anchorMax.y /= Screen.height;
+
+        _safeArea.anchorMin = anchorMin;
+        _safeArea.anchorMax = anchorMax;
+        _safeArea.offsetMin = Vector2.zero;
+        _safeArea.offsetMax = Vector2.zero;
+    }
+
+    // ------------------------------------------------------------
+    // Navigation
+    // ------------------------------------------------------------
+    void NavigateTo(ScreenId id, bool clearStack = false)
+    {
+        if (clearStack) _backStack.Clear();
+        ShowOnly(id);
+    }
+
+    void PushAndGo(ScreenId next)
+    {
+        var current = CurrentScreen();
+        if (current != next) _backStack.Push(current);
+        NavigateTo(next);
+    }
+
+    void GoBack()
+    {
+        if (_backStack.Count == 0) return;
+        NavigateTo(_backStack.Pop());
+    }
+
+    ScreenId CurrentScreen()
+    {
+        if (_loginPanel.activeSelf) return ScreenId.Login;
+        if (_homePanel.activeSelf) return ScreenId.Home;
+        if (_modelOptionsPanel.activeSelf) return ScreenId.ModelOptions;
+        if (_checklistPanel.activeSelf) return ScreenId.Checklist;
+        if (_alignPanel.activeSelf) return ScreenId.Align;
+        if (_inspectionPanel.activeSelf) return ScreenId.Inspection;
+        return ScreenId.Report;
+    }
+
+    void ShowOnly(ScreenId id)
+    {
+        _loginPanel.SetActive(id == ScreenId.Login);
+        _homePanel.SetActive(id == ScreenId.Home);
+        _modelOptionsPanel.SetActive(id == ScreenId.ModelOptions);
+        _checklistPanel.SetActive(id == ScreenId.Checklist);
+        _alignPanel.SetActive(id == ScreenId.Align);
+        _inspectionPanel.SetActive(id == ScreenId.Inspection);
+        _reportPanel.SetActive(id == ScreenId.Report);
+
+        if (id == ScreenId.Home) RefreshHistory();
+        if (id == ScreenId.ModelOptions) RefreshModelOptions();
+        if (id == ScreenId.Checklist) RefreshChecklistUI();
+        if (id == ScreenId.Align) RefreshAlignUI();
+        if (id == ScreenId.Inspection) RefreshInspectionUI();
+        if (id == ScreenId.Report) RefreshReportUI();
+
+        BringOverlaysToFront();
+    }
+
+    // ------------------------------------------------------------
+    // Overlays (Toast + Modal)
+    // ------------------------------------------------------------
+    void BuildCommonOverlays()
+    {
+        // Toast
+        _toastGO = new GameObject("Toast", typeof(RectTransform), typeof(CanvasGroup), typeof(Image));
+        _toastGO.transform.SetParent(_safeArea, false);
+        var rt = _toastGO.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.5f, 0);
+        rt.anchorMax = new Vector2(0.5f, 0);
+        rt.pivot = new Vector2(0.5f, 0);
+        rt.anchoredPosition = new Vector2(0, 18);
+        rt.sizeDelta = new Vector2(920, 78);
+
+        _toastGO.GetComponent<Image>().color = new Color(0, 0, 0, 0.78f);
+        _toastGroup = _toastGO.GetComponent<CanvasGroup>();
+        _toastGroup.alpha = 0;
+        _toastGroup.blocksRaycasts = false;
+
+        _toastText = CreateText(_toastGO.transform, "ToastText", "Saved", 22, TextAnchor.MiddleCenter, Color.white);
+        Stretch(_toastText.rectTransform, 14, 14, 10, 10);
+
+        // Modal blocker
+        _modalBlocker = new GameObject("ModalBlocker", typeof(RectTransform), typeof(Image));
+        _modalBlocker.transform.SetParent(_safeArea, false);
+        Stretch(_modalBlocker.GetComponent<RectTransform>());
+        _modalBlocker.GetComponent<Image>().color = new Color(0, 0, 0, 0.55f);
+        _modalBlocker.SetActive(false);
+
+        var card = CreateCard(_modalBlocker.transform, "ModalCard", new Vector2(980, 460));
+        card.GetComponent<RectTransform>().anchoredPosition = Vector2.zero;
+
+        _modalTitle = CreateText(card.transform, "Title", "Title", 28, TextAnchor.MiddleLeft, C_TEXT);
+        _modalTitle.rectTransform.anchorMin = new Vector2(0, 1);
+        _modalTitle.rectTransform.anchorMax = new Vector2(1, 1);
+        _modalTitle.rectTransform.pivot = new Vector2(0.5f, 1);
+        _modalTitle.rectTransform.sizeDelta = new Vector2(0, 70);
+        _modalTitle.rectTransform.anchoredPosition = new Vector2(0, -18);
+        _modalTitle.rectTransform.offsetMin = new Vector2(30, _modalTitle.rectTransform.offsetMin.y);
+        _modalTitle.rectTransform.offsetMax = new Vector2(-30, _modalTitle.rectTransform.offsetMax.y);
+
+        _modalBody = CreateText(card.transform, "Body", "Body", 20, TextAnchor.UpperLeft, C_SUB);
+        _modalBody.rectTransform.anchorMin = new Vector2(0, 0.26f);
+        _modalBody.rectTransform.anchorMax = new Vector2(1, 0.82f);
+        _modalBody.rectTransform.offsetMin = new Vector2(30, 0);
+        _modalBody.rectTransform.offsetMax = new Vector2(-30, 0);
+
+        _modalPrimary = CreateButton(card.transform, "Primary", "OK", C_PRIMARY, true);
+        _modalSecondary = CreateButton(card.transform, "Secondary", "Cancel", Hex("#3B4449"), true);
+
+        PlaceButtonBottomRight(_modalPrimary.GetComponent<RectTransform>(), 30, 24);
+        PlaceButtonBottomLeft(_modalSecondary.GetComponent<RectTransform>(), 30, 24);
+
+        _modalPrimary.onClick.AddListener(() => HideModal());
+        _modalSecondary.onClick.AddListener(() => HideModal());
+
+        BringOverlaysToFront();
+    }
+
+    void BringOverlaysToFront()
+    {
+        if (_modalBlocker != null) _modalBlocker.transform.SetAsLastSibling();
+        if (_toastGO != null) _toastGO.transform.SetAsLastSibling();
+    }
+
+    void ShowModal(string title, string body, string primaryLabel, Action primaryAction, string secondaryLabel = null, Action secondaryAction = null)
+    {
+        _modalTitle.text = title;
+        _modalBody.text = body;
+
+        SetButtonLabel(_modalPrimary, primaryLabel ?? "OK");
+        _modalPrimary.onClick.RemoveAllListeners();
+        _modalPrimary.onClick.AddListener(() =>
+        {
+            HideModal();
+            primaryAction?.Invoke();
+        });
+
+        if (!string.IsNullOrEmpty(secondaryLabel))
+        {
+            _modalSecondary.gameObject.SetActive(true);
+            SetButtonLabel(_modalSecondary, secondaryLabel);
+            _modalSecondary.onClick.RemoveAllListeners();
+            _modalSecondary.onClick.AddListener(() =>
+            {
+                HideModal();
+                secondaryAction?.Invoke();
+            });
+        }
+        else _modalSecondary.gameObject.SetActive(false);
+
+        _modalBlocker.SetActive(true);
+        BringOverlaysToFront();
+    }
+
+    void HideModal() => _modalBlocker.SetActive(false);
+
+    Coroutine _toastRoutine;
+    void Toast(string msg, float seconds = 1.2f)
+    {
+        if (_toastRoutine != null) StopCoroutine(_toastRoutine);
+        _toastRoutine = StartCoroutine(ToastRoutine(msg, seconds));
+    }
+
+    IEnumerator ToastRoutine(string msg, float seconds)
+    {
+        _toastText.text = msg;
+        _toastGroup.alpha = 1;
+        yield return new WaitForSeconds(seconds);
+        float t = 0;
+        while (t < 0.25f)
+        {
+            t += Time.deltaTime;
+            _toastGroup.alpha = Mathf.Lerp(1, 0, t / 0.25f);
+            yield return null;
+        }
+        _toastGroup.alpha = 0;
+    }
+
+    // ------------------------------------------------------------
+    // Screens
+    // ------------------------------------------------------------
+
+    // LOGIN
+    void BuildLoginScreen()
+    {
+        _loginPanel = CreateScreen("LoginScreen");
+        CreateTopBar(_loginPanel.transform, "INSPECTION", showBack: false, backAction: null, rightLabel: null, rightAction: null);
+
+        var card = CreateCard(_loginPanel.transform, "LoginCard", new Vector2(980, 560));
+        card.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -30);
+
+        var title = CreateText(card.transform, "Title", "Sign In", 40, TextAnchor.MiddleCenter, C_TEXT);
+        title.rectTransform.anchorMin = new Vector2(0, 0.74f);
+        title.rectTransform.anchorMax = new Vector2(1, 1);
+        title.rectTransform.offsetMin = new Vector2(20, 0);
+        title.rectTransform.offsetMax = new Vector2(-20, -14);
+
+        _loginUser = CreateInput(card.transform, "User", "Username / Email");
+        _loginUser.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 70);
+
+        _loginPass = CreateInput(card.transform, "Pass", "Password");
+        _loginPass.contentType = InputField.ContentType.Password;
+        _loginPass.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 0);
+
+        _loginError = CreateText(card.transform, "Error", "", 20, TextAnchor.MiddleCenter, C_DANGER);
+        _loginError.rectTransform.anchorMin = new Vector2(0, 0.18f);
+        _loginError.rectTransform.anchorMax = new Vector2(1, 0.30f);
+        _loginError.rectTransform.offsetMin = new Vector2(20, 0);
+        _loginError.rectTransform.offsetMax = new Vector2(-20, 0);
+
+        var loginBtn = CreateButton(card.transform, "LoginBtn", "LOGIN", C_PRIMARY, true);
+        loginBtn.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -140);
+        loginBtn.onClick.AddListener(() =>
+        {
+            var u = _loginUser.text?.Trim();
+            var p = _loginPass.text?.Trim();
+
+            if (string.IsNullOrEmpty(u) || string.IsNullOrEmpty(p))
+            {
+                _loginError.text = "Enter username and password.";
+                return;
+            }
+
+            PlayerPrefs.SetInt("is_logged_in", 1);
+            PlayerPrefs.SetString("user_name", u);
+            PlayerPrefs.Save();
+
+            _loginError.text = "";
+            Toast("Signed in");
+            NavigateTo(ScreenId.Home, clearStack: true);
+        });
+
+        var hint = CreateText(_loginPanel.transform, "Hint",
+            "Demo login (local). Replace with your auth later.",
+            18, TextAnchor.LowerCenter, C_MUTED);
+        hint.rectTransform.anchorMin = new Vector2(0, 0);
+        hint.rectTransform.anchorMax = new Vector2(1, 0.10f);
+        hint.rectTransform.offsetMin = new Vector2(20, 10);
+        hint.rectTransform.offsetMax = new Vector2(-20, -10);
+    }
+
+    // HOME
+    void BuildHomeScreen()
+    {
+        _homePanel = CreateScreen("HomeScreen");
+
+        var topBar = CreateTopBar(
+            _homePanel.transform,
+            "RECENT MODELS",
+            showBack: false,
+            backAction: null,
+            rightLabel: "+ ADD",
+            rightAction: () => OnAddClicked()
+        );
+
+        // Logout button on Home
+        var logoutBtn = CreateButton(topBar.transform, "LogoutBtn", "LOGOUT", Hex("#2A3338"), true);
+        var lrt = logoutBtn.GetComponent<RectTransform>();
+        lrt.anchorMin = new Vector2(1, 0.15f);
+        lrt.anchorMax = new Vector2(1, 0.85f);
+        lrt.pivot = new Vector2(1, 0.5f);
+        lrt.sizeDelta = new Vector2(200, 0);
+        lrt.anchoredPosition = new Vector2(-250, 0);
+
+        logoutBtn.onClick.RemoveAllListeners();
+        logoutBtn.onClick.AddListener(() =>
+        {
+            PlayerPrefs.SetInt("is_logged_in", 0);
+            PlayerPrefs.DeleteKey("user_name");
+            PlayerPrefs.Save();
+
+            _selectedModel = null;
+            _selectedTemplate = null;
+            _activeRun = null;
+
+            Toast("Signed out");
+            NavigateTo(ScreenId.Login, clearStack: true);
+        });
+
+        _homeWelcome = CreateText(_homePanel.transform, "Welcome", "", 20, TextAnchor.UpperLeft, C_SUB);
+        _homeWelcome.rectTransform.anchorMin = new Vector2(0, 0.86f);
+        _homeWelcome.rectTransform.anchorMax = new Vector2(1, 0.94f);
+        _homeWelcome.rectTransform.offsetMin = new Vector2(26, 0);
+        _homeWelcome.rectTransform.offsetMax = new Vector2(-26, 0);
+
+        var listCard = CreatePanel(_homePanel.transform, "ListCard", C_CARD, true);
+        AddBorder(listCard, C_BORDER);
+        var listRT = listCard.GetComponent<RectTransform>();
+        listRT.anchorMin = new Vector2(0, 0.06f);
+        listRT.anchorMax = new Vector2(1, 0.86f);
+        listRT.offsetMin = new Vector2(20, 16);
+        listRT.offsetMax = new Vector2(-20, -10);
+
+        CreateScrollView(listCard.transform, out _historyContent,
+            anchorMin: new Vector2(0, 0),
+            anchorMax: new Vector2(1, 1),
+            padding: new Vector4(16, 16, 16, 16));
+    }
+
+    void RefreshHistory()
+    {
+        _homeWelcome.text = "Signed in: " + PlayerPrefs.GetString("user_name", "User");
+
+        ClearChildren(_historyContent);
+
+        var hist = Persist.LoadHistory();
+        hist.models.Sort((a, b) => string.Compare(b.lastUsed, a.lastUsed));
+
+        if (hist.models.Count == 0)
+        {
+            var empty = CreateText(_historyContent, "Empty",
+                "No models added yet.\nTap + ADD to begin.",
+                22, TextAnchor.MiddleCenter, C_SUB);
+            empty.rectTransform.sizeDelta = new Vector2(0, 260);
+            return;
+        }
+
+        foreach (var m in hist.models)
+        {
+            var card = CreateListCard(_historyContent,
+                m.displayName,
+                $"Last used: {m.lastUsed}\n{ShortPath(m.sourcePath)}",
+                () =>
+                {
+                    _selectedModel = m;
+                    _selectedTemplate = Persist.GetOrCreateTemplate(m.id);
+                    PushAndGo(ScreenId.ModelOptions);
+                });
+            AddBorder(card, C_BORDER);
+        }
+    }
+
+    // + ADD behavior: file picker in Editor, modal input otherwise
+    void OnAddClicked()
+    {
+#if UNITY_EDITOR
+        string path = EditorUtility.OpenFilePanel(
+            "Select CAD / Mesh File",
+            "",
+            "step,stp,obj,fbx,glb,gltf,stl"
+        );
+
+        if (string.IsNullOrEmpty(path))
+        {
+            Toast("No file selected");
+            return;
+        }
+
+        AddModelFromPath(path, autoNavigateToOptions: true);
+#else
+        ShowAddModelModal();
+#endif
+    }
+
+    void AddModelFromPath(string path, bool autoNavigateToOptions)
+    {
+        var name = Path.GetFileNameWithoutExtension(path);
+        var id = Persist.NewId("model");
+
+        var m = new ModelEntry
+        {
+            id = id,
+            displayName = name,         // automatic name from file
+            sourcePath = path,
+            lastUsed = Persist.Now()
+        };
+
+        Persist.UpsertModel(m);
+        _selectedModel = m;
+        _selectedTemplate = Persist.GetOrCreateTemplate(m.id);
+
+        Toast("Model added");
+        RefreshHistory();
+
+        if (autoNavigateToOptions)
+            PushAndGo(ScreenId.ModelOptions);
+    }
+
+    // Manual modal input (for non-editor builds until we add native picker)
+    void ShowAddModelModal()
+    {
+        ShowModal(
+            "Add Model",
+            "Runtime file picker will be added later (iPad Files app).\n\nFor now, enter a name + a reference path.",
+            "CONTINUE",
+            () =>
+            {
+                // Build dynamic inputs on the modal card
+                var modalCard = _modalTitle.transform.parent;
+                var old = modalCard.Find("DynamicInputs");
+                if (old != null) Destroy(old.gameObject);
+
+                var dyn = new GameObject("DynamicInputs", typeof(RectTransform));
+                dyn.transform.SetParent(modalCard, false);
+                var drt = dyn.GetComponent<RectTransform>();
+                drt.anchorMin = new Vector2(0, 0.30f);
+                drt.anchorMax = new Vector2(1, 0.68f);
+                drt.offsetMin = new Vector2(30, 0);
+                drt.offsetMax = new Vector2(-30, 0);
+
+                var nameInput = CreateInput(dyn.transform, "ModelName", "Model name");
+                nameInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 45);
+
+                var pathInput = CreateInput(dyn.transform, "ModelPath", "Reference path");
+                pathInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -25);
+
+                // re-open modal with the inputs present
+                _modalTitle.text = "Add Model";
+                _modalBody.text = "Enter a friendly name and reference path.";
+
+                SetButtonLabel(_modalPrimary, "ADD");
+                _modalPrimary.onClick.RemoveAllListeners();
+                _modalPrimary.onClick.AddListener(() =>
+                {
+                    var name = (nameInput.text ?? "").Trim();
+                    var path = (pathInput.text ?? "").Trim();
+                    if (string.IsNullOrEmpty(name))
+                    {
+                        Toast("Model name required");
+                        return;
+                    }
+
+                    var id = Persist.NewId("model");
+                    var m = new ModelEntry
+                    {
+                        id = id,
+                        displayName = name,
+                        sourcePath = string.IsNullOrEmpty(path) ? "(none)" : path,
+                        lastUsed = Persist.Now()
+                    };
+
+                    Persist.UpsertModel(m);
+                    _selectedModel = m;
+                    _selectedTemplate = Persist.GetOrCreateTemplate(m.id);
+
+                    HideModal();
+                    Toast("Model added");
+                    RefreshHistory();
+                    PushAndGo(ScreenId.ModelOptions);
+                });
+
+                _modalSecondary.gameObject.SetActive(true);
+                SetButtonLabel(_modalSecondary, "CANCEL");
+                _modalSecondary.onClick.RemoveAllListeners();
+                _modalSecondary.onClick.AddListener(() => HideModal());
+
+                _modalBlocker.SetActive(true);
+                BringOverlaysToFront();
+            },
+            "CANCEL",
+            () => { }
+        );
+    }
+
+    // MODEL OPTIONS
+    void BuildModelOptionsScreen()
+    {
+        _modelOptionsPanel = CreateScreen("ModelOptionsScreen");
+
+        CreateTopBar(
+            _modelOptionsPanel.transform,
+            "MODEL",
+            showBack: true,
+            backAction: () => GoBack(),
+            rightLabel: null,
+            rightAction: null
+        );
+
+        var card = CreateCard(_modelOptionsPanel.transform, "ModelCard", new Vector2(1020, 560));
+        card.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -25);
+
+        _modelHeader = CreateText(card.transform, "Name", "—", 34, TextAnchor.UpperLeft, C_TEXT);
+        _modelHeader.rectTransform.anchorMin = new Vector2(0, 0.72f);
+        _modelHeader.rectTransform.anchorMax = new Vector2(1, 1);
+        _modelHeader.rectTransform.offsetMin = new Vector2(26, 0);
+        _modelHeader.rectTransform.offsetMax = new Vector2(-26, -18);
+
+        _modelSub = CreateText(card.transform, "Sub", "—", 20, TextAnchor.UpperLeft, C_SUB);
+        _modelSub.rectTransform.anchorMin = new Vector2(0, 0.56f);
+        _modelSub.rectTransform.anchorMax = new Vector2(1, 0.74f);
+        _modelSub.rectTransform.offsetMin = new Vector2(26, 0);
+        _modelSub.rectTransform.offsetMax = new Vector2(-26, 0);
+
+        var btnChecklist = CreateButton(card.transform, "ChecklistBtn", "EDIT CHECKLIST", C_PRIMARY, true);
+        btnChecklist.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 60);
+        btnChecklist.onClick.AddListener(() => PushAndGo(ScreenId.Checklist));
+
+        var btnAlign = CreateButton(card.transform, "AlignBtn", "ALIGN (START)", Hex("#2A3338"), true);
+        btnAlign.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -20);
+        btnAlign.onClick.AddListener(() => PushAndGo(ScreenId.Align));
+
+        var btnInspect = CreateButton(card.transform, "InspectBtn", "START INSPECTION", C_SUCCESS, true);
+        btnInspect.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -100);
+        btnInspect.onClick.AddListener(() =>
+        {
+            if (_selectedTemplate == null) _selectedTemplate = Persist.GetOrCreateTemplate(_selectedModel.id);
+            if (_selectedTemplate.points.Count == 0)
+            {
+                Toast("Checklist empty — add points");
+                PushAndGo(ScreenId.Checklist);
+                return;
+            }
+            PushAndGo(ScreenId.Align);
+        });
+
+        var btnHome = CreateButton(card.transform, "HomeBtn", "BACK TO HOME", Hex("#3B4449"), true);
+        btnHome.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -180);
+        btnHome.onClick.AddListener(() => NavigateTo(ScreenId.Home, clearStack: true));
+    }
+
+    void RefreshModelOptions()
+    {
+        if (_selectedModel == null) return;
+
+        _modelHeader.text = _selectedModel.displayName;
+        _modelSub.text = $"REF: {ShortPath(_selectedModel.sourcePath)}\nCHECKLIST: {_selectedTemplate?.points?.Count ?? 0} point(s)";
+
+        _selectedModel.lastUsed = Persist.Now();
+        Persist.UpsertModel(_selectedModel);
+    }
+
+    // CHECKLIST
+    void BuildChecklistScreen()
+    {
+        _checklistPanel = CreateScreen("ChecklistScreen");
+
+        CreateTopBar(
+            _checklistPanel.transform,
+            "CHECKLIST",
+            showBack: true,
+            backAction: () => GoBack(),
+            rightLabel: "SAVE",
+            rightAction: () =>
+            {
+                Persist.UpsertTemplate(_selectedTemplate);
+                Toast("Checklist saved");
+            });
+
+        var topCard = CreatePanel(_checklistPanel.transform, "TopCard", C_CARD, true);
+        AddBorder(topCard, C_BORDER);
+        var tRT = topCard.GetComponent<RectTransform>();
+        tRT.anchorMin = new Vector2(0, 0.82f);
+        tRT.anchorMax = new Vector2(1, 0.94f);
+        tRT.offsetMin = new Vector2(20, 0);
+        tRT.offsetMax = new Vector2(-20, 0);
+
+        var lbl = CreateText(topCard.transform, "Lbl", "TEMPLATE", 18, TextAnchor.MiddleLeft, C_MUTED);
+        lbl.rectTransform.anchorMin = new Vector2(0, 0);
+        lbl.rectTransform.anchorMax = new Vector2(0.22f, 1);
+        lbl.rectTransform.offsetMin = new Vector2(20, 0);
+        lbl.rectTransform.offsetMax = new Vector2(-10, 0);
+
+        _templateNameInput = CreateInput(topCard.transform, "TemplateName", "Default Checklist");
+        var inRT = _templateNameInput.GetComponent<RectTransform>();
+        inRT.anchorMin = new Vector2(0.22f, 0.18f);
+        inRT.anchorMax = new Vector2(1, 0.82f);
+        inRT.offsetMin = new Vector2(0, 0);
+        inRT.offsetMax = new Vector2(-20, 0);
+        inRT.sizeDelta = Vector2.zero;
+
+        var listCard = CreatePanel(_checklistPanel.transform, "PointsCard", C_CARD, true);
+        AddBorder(listCard, C_BORDER);
+        var lRT = listCard.GetComponent<RectTransform>();
+        lRT.anchorMin = new Vector2(0, 0.14f);
+        lRT.anchorMax = new Vector2(1, 0.82f);
+        lRT.offsetMin = new Vector2(20, 0);
+        lRT.offsetMax = new Vector2(-20, -10);
+
+        _pointsCountText = CreateText(listCard.transform, "Count", "0 point(s)", 18, TextAnchor.UpperLeft, C_SUB);
+        _pointsCountText.rectTransform.anchorMin = new Vector2(0, 0.92f);
+        _pointsCountText.rectTransform.anchorMax = new Vector2(1, 1);
+        _pointsCountText.rectTransform.offsetMin = new Vector2(20, 0);
+        _pointsCountText.rectTransform.offsetMax = new Vector2(-20, -10);
+
+        CreateScrollView(listCard.transform, out _pointsContent,
+            anchorMin: new Vector2(0, 0),
+            anchorMax: new Vector2(1, 0.92f),
+            padding: new Vector4(16, 16, 16, 16));
+
+        var bottom = CreatePanel(_checklistPanel.transform, "Bottom", new Color(0, 0, 0, 0), false);
+        var bRT = bottom.GetComponent<RectTransform>();
+        bRT.anchorMin = new Vector2(0, 0.02f);
+        bRT.anchorMax = new Vector2(1, 0.14f);
+        bRT.offsetMin = new Vector2(20, 0);
+        bRT.offsetMax = new Vector2(-20, 0);
+
+        var addBtn = CreateButton(bottom.transform, "AddPoint", "+ ADD POINT", C_PRIMARY, true);
+        addBtn.GetComponent<RectTransform>().anchorMin = new Vector2(0, 0.1f);
+        addBtn.GetComponent<RectTransform>().anchorMax = new Vector2(0.48f, 0.9f);
+        Stretch(addBtn.GetComponent<RectTransform>(), 0, 0, 0, 0);
+        addBtn.onClick.AddListener(() => ShowAddPointModal());
+
+        var nextBtn = CreateButton(bottom.transform, "GoAlign", "NEXT: ALIGN", C_SUCCESS, true);
+        nextBtn.GetComponent<RectTransform>().anchorMin = new Vector2(0.52f, 0.1f);
+        nextBtn.GetComponent<RectTransform>().anchorMax = new Vector2(1, 0.9f);
+        Stretch(nextBtn.GetComponent<RectTransform>(), 0, 0, 0, 0);
+        nextBtn.onClick.AddListener(() =>
+        {
+            Persist.UpsertTemplate(_selectedTemplate);
+            PushAndGo(ScreenId.Align);
+        });
+    }
+
+    void RefreshChecklistUI()
+    {
+        if (_selectedModel == null) return;
+
+        _selectedTemplate = Persist.GetOrCreateTemplate(_selectedModel.id);
+        _templateNameInput.text = _selectedTemplate.templateName;
+
+        _pointsCountText.text = $"{_selectedTemplate.points.Count} point(s)";
+        ClearChildren(_pointsContent);
+
+        for (int i = 0; i < _selectedTemplate.points.Count; i++)
+        {
+            int idx = i;
+            var p = _selectedTemplate.points[i];
+
+            var row = CreatePanel(_pointsContent, "PointRow", Hex("#12171A"), true);
+            AddBorder(row, C_BORDER);
+            row.GetComponent<RectTransform>().sizeDelta = new Vector2(0, 156);
+
+            var title = CreateText(row.transform, "Name", $"{idx + 1}. {p.name}", 22, TextAnchor.UpperLeft, C_TEXT);
+            title.rectTransform.anchorMin = new Vector2(0, 0.56f);
+            title.rectTransform.anchorMax = new Vector2(1, 1);
+            title.rectTransform.offsetMin = new Vector2(16, 0);
+            title.rectTransform.offsetMax = new Vector2(-16, -10);
+
+            var sub = CreateText(row.transform, "Instr", $"{p.instruction}\nTOL: {p.tolerance}", 18, TextAnchor.UpperLeft, C_SUB);
+            sub.rectTransform.anchorMin = new Vector2(0, 0);
+            sub.rectTransform.anchorMax = new Vector2(1, 0.56f);
+            sub.rectTransform.offsetMin = new Vector2(16, 10);
+            sub.rectTransform.offsetMax = new Vector2(-240, 10);
+
+            var btnEdit = CreateMiniButton(row.transform, "Edit", "EDIT", Hex("#2A3338"));
+            var btnUp = CreateMiniButton(row.transform, "Up", "↑", Hex("#2A3338"));
+            var btnDown = CreateMiniButton(row.transform, "Down", "↓", Hex("#2A3338"));
+            var btnDel = CreateMiniButton(row.transform, "Del", "X", C_DANGER);
+
+            PlaceMiniButton(btnEdit.GetComponent<RectTransform>(), 1, 16);
+            PlaceMiniButton(btnUp.GetComponent<RectTransform>(), 2, 16);
+            PlaceMiniButton(btnDown.GetComponent<RectTransform>(), 3, 16);
+            PlaceMiniButton(btnDel.GetComponent<RectTransform>(), 4, 16);
+
+            btnEdit.onClick.AddListener(() => ShowEditPointModal(idx));
+            btnUp.onClick.AddListener(() =>
+            {
+                if (idx <= 0) return;
+                (_selectedTemplate.points[idx - 1], _selectedTemplate.points[idx]) =
+                    (_selectedTemplate.points[idx], _selectedTemplate.points[idx - 1]);
+                RefreshChecklistUI();
+            });
+            btnDown.onClick.AddListener(() =>
+            {
+                if (idx >= _selectedTemplate.points.Count - 1) return;
+                (_selectedTemplate.points[idx + 1], _selectedTemplate.points[idx]) =
+                    (_selectedTemplate.points[idx], _selectedTemplate.points[idx + 1]);
+                RefreshChecklistUI();
+            });
+            btnDel.onClick.AddListener(() =>
+            {
+                ShowModal("Delete point?",
+                    $"Delete “{p.name}” from checklist?",
+                    "DELETE",
+                    () =>
+                    {
+                        _selectedTemplate.points.RemoveAt(idx);
+                        Persist.UpsertTemplate(_selectedTemplate);
+                        RefreshChecklistUI();
+                        Toast("Point deleted");
+                    },
+                    "CANCEL", null);
+            });
+        }
+
+        _templateNameInput.onEndEdit.RemoveAllListeners();
+        _templateNameInput.onEndEdit.AddListener(val =>
+        {
+            _selectedTemplate.templateName = string.IsNullOrEmpty(val) ? "Default Checklist" : val.Trim();
+        });
+    }
+
+    void ShowAddPointModal() => ShowPointEditorModal("Add Inspection Point", null, (name, instr, tol) =>
+    {
+        _selectedTemplate.points.Add(new InspectionPoint
+        {
+            id = Persist.NewId("pt"),
+            name = name,
+            instruction = instr,
+            tolerance = tol
+        });
+        Persist.UpsertTemplate(_selectedTemplate);
+        RefreshChecklistUI();
+        Toast("Point added");
+    });
+
+    void ShowEditPointModal(int idx)
+    {
+        if (idx < 0 || idx >= _selectedTemplate.points.Count) return;
+        var existing = _selectedTemplate.points[idx];
+        ShowPointEditorModal("Edit Inspection Point", existing, (name, instr, tol) =>
+        {
+            existing.name = name;
+            existing.instruction = instr;
+            existing.tolerance = tol;
+            Persist.UpsertTemplate(_selectedTemplate);
+            RefreshChecklistUI();
+            Toast("Point updated");
+        });
+    }
+
+    void ShowPointEditorModal(string title, InspectionPoint existing, Action<string, string, string> onSave)
+    {
+        _modalBlocker.SetActive(true);
+        BringOverlaysToFront();
+
+        _modalTitle.text = title;
+        _modalBody.text = "Define what to inspect. Keep it short and clear.";
+
+        var card = _modalTitle.transform.parent;
+        var old = card.Find("DynamicInputs");
+        if (old != null) Destroy(old.gameObject);
+
+        var dyn = new GameObject("DynamicInputs", typeof(RectTransform));
+        dyn.transform.SetParent(card, false);
+        var drt = dyn.GetComponent<RectTransform>();
+        drt.anchorMin = new Vector2(0, 0.26f);
+        drt.anchorMax = new Vector2(1, 0.70f);
+        drt.offsetMin = new Vector2(30, 0);
+        drt.offsetMax = new Vector2(-30, 0);
+
+        var nameInput = CreateInput(dyn.transform, "Name", "Point name");
+        nameInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 80);
+
+        var instrInput = CreateInput(dyn.transform, "Instr", "Instruction");
+        instrInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 15);
+
+        var tolInput = CreateInput(dyn.transform, "Tol", "Tolerance");
+        tolInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -50);
+
+        if (existing != null)
+        {
+            nameInput.text = existing.name;
+            instrInput.text = existing.instruction;
+            tolInput.text = existing.tolerance;
+        }
+
+        SetButtonLabel(_modalPrimary, "SAVE");
+        _modalPrimary.onClick.RemoveAllListeners();
+        _modalPrimary.onClick.AddListener(() =>
+        {
+            var n = (nameInput.text ?? "").Trim();
+            var ins = (instrInput.text ?? "").Trim();
+            var t = (tolInput.text ?? "").Trim();
+
+            if (string.IsNullOrEmpty(n)) { Toast("Point name required"); return; }
+            if (string.IsNullOrEmpty(ins)) ins = "Inspect as per standard.";
+            if (string.IsNullOrEmpty(t)) t = "N/A";
+
+            HideModal();
+            onSave?.Invoke(n, ins, t);
+        });
+
+        _modalSecondary.gameObject.SetActive(true);
+        SetButtonLabel(_modalSecondary, "CANCEL");
+        _modalSecondary.onClick.RemoveAllListeners();
+        _modalSecondary.onClick.AddListener(() => HideModal());
+    }
+
+    // ALIGN (placeholder)
+    void BuildAlignScreen()
+    {
+        _alignPanel = CreateScreen("AlignScreen");
+        CreateTopBar(_alignPanel.transform, "ALIGN", true, () => GoBack(), null, null);
+
+        var card = CreateCard(_alignPanel.transform, "AlignCard", new Vector2(1020, 580));
+        card.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -20);
+
+        _alignModelName = CreateText(card.transform, "ModelName", "MODEL: —", 24, TextAnchor.UpperLeft, C_TEXT);
+        _alignModelName.rectTransform.anchorMin = new Vector2(0, 0.84f);
+        _alignModelName.rectTransform.anchorMax = new Vector2(1, 1);
+        _alignModelName.rectTransform.offsetMin = new Vector2(24, 0);
+        _alignModelName.rectTransform.offsetMax = new Vector2(-24, -16);
+
+        var help = CreateText(card.transform, "Help",
+            "ALIGNMENT (placeholder):\n\n• Later: AR camera + transparent CAD overlay.\n• User manually aligns model to physical part.\n\nFor now: confirm alignment to proceed.",
+            20, TextAnchor.UpperLeft, C_SUB);
+        help.rectTransform.anchorMin = new Vector2(0, 0.34f);
+        help.rectTransform.anchorMax = new Vector2(1, 0.84f);
+        help.rectTransform.offsetMin = new Vector2(24, 0);
+        help.rectTransform.offsetMax = new Vector2(-24, 0);
+
+        var toggleRow = CreatePanel(card.transform, "ToggleRow", Hex("#12171A"), true);
+        AddBorder(toggleRow, C_BORDER);
+        var trt = toggleRow.GetComponent<RectTransform>();
+        trt.anchorMin = new Vector2(0, 0.20f);
+        trt.anchorMax = new Vector2(1, 0.32f);
+        trt.offsetMin = new Vector2(24, 0);
+        trt.offsetMax = new Vector2(-24, 0);
+
+        var toggleGO = new GameObject("AlignToggle", typeof(RectTransform), typeof(Toggle));
+        toggleGO.transform.SetParent(toggleRow.transform, false);
+        Stretch(toggleGO.GetComponent<RectTransform>(), 0, 0, 0, 0);
+
+        var box = new GameObject("Box", typeof(RectTransform), typeof(Image));
+        box.transform.SetParent(toggleGO.transform, false);
+        var brt = box.GetComponent<RectTransform>();
+        brt.anchorMin = new Vector2(0, 0.5f);
+        brt.anchorMax = new Vector2(0, 0.5f);
+        brt.sizeDelta = new Vector2(36, 36);
+        brt.anchoredPosition = new Vector2(20, 0);
+        box.GetComponent<Image>().color = Hex("#1E2528");
+
+        var mark = new GameObject("Mark", typeof(RectTransform), typeof(Image));
+        mark.transform.SetParent(box.transform, false);
+        Stretch(mark.GetComponent<RectTransform>(), 6, 6, 6, 6);
+        mark.GetComponent<Image>().color = C_ACCENT;
+
+        _alignConfirmedToggle = toggleGO.GetComponent<Toggle>();
+        _alignConfirmedToggle.targetGraphic = box.GetComponent<Image>();
+        _alignConfirmedToggle.graphic = mark.GetComponent<Image>();
+        _alignConfirmedToggle.isOn = false;
+
+        var tlabel = CreateText(toggleGO.transform, "Label", "ALIGNED TO PHYSICAL PART", 22, TextAnchor.MiddleLeft, C_TEXT);
+        tlabel.rectTransform.anchorMin = new Vector2(0, 0);
+        tlabel.rectTransform.anchorMax = new Vector2(1, 1);
+        tlabel.rectTransform.offsetMin = new Vector2(80, 0);
+        tlabel.rectTransform.offsetMax = new Vector2(-20, 0);
+
+        var startBtn = CreateButton(card.transform, "StartInspection", "START INSPECTION", C_SUCCESS, true);
+        startBtn.GetComponent<RectTransform>().anchorMin = new Vector2(0.52f, 0.03f);
+        startBtn.GetComponent<RectTransform>().anchorMax = new Vector2(1, 0.15f);
+        Stretch(startBtn.GetComponent<RectTransform>(), 0, 0, 0, 0);
+        startBtn.onClick.AddListener(() =>
+        {
+            if (_selectedTemplate == null || _selectedTemplate.points.Count == 0)
+            {
+                Toast("Checklist empty");
+                PushAndGo(ScreenId.Checklist);
+                return;
+            }
+            if (!_alignConfirmedToggle.isOn)
+            {
+                Toast("Confirm alignment");
+                return;
+            }
+            BeginRun();
+            PushAndGo(ScreenId.Inspection);
+        });
+
+        var backBtn = CreateButton(card.transform, "BackToChecklist", "BACK TO CHECKLIST", Hex("#2A3338"), true);
+        backBtn.GetComponent<RectTransform>().anchorMin = new Vector2(0, 0.03f);
+        backBtn.GetComponent<RectTransform>().anchorMax = new Vector2(0.48f, 0.15f);
+        Stretch(backBtn.GetComponent<RectTransform>(), 0, 0, 0, 0);
+        backBtn.onClick.AddListener(() => PushAndGo(ScreenId.Checklist));
+    }
+
+    void RefreshAlignUI()
+    {
+        _alignModelName.text = _selectedModel != null ? $"MODEL: {_selectedModel.displayName}" : "MODEL: —";
+        _alignConfirmedToggle.isOn = false;
+    }
+
+    // INSPECTION
+    void BuildInspectionScreen()
+    {
+        _inspectionPanel = CreateScreen("InspectionScreen");
+        CreateTopBar(_inspectionPanel.transform, "INSPECTION", true, () => GoBack(), "REPORT", () => PushAndGo(ScreenId.Report));
+
+        // Layout: left drawer (steps) + right main panel
+        var left = CreatePanel(_inspectionPanel.transform, "LeftDrawer", Hex("#101416"), true);
+        AddBorder(left, C_BORDER);
+        var lrt = left.GetComponent<RectTransform>();
+        lrt.anchorMin = new Vector2(0, 0.02f);
+        lrt.anchorMax = new Vector2(0.28f, 0.92f);
+        lrt.offsetMin = new Vector2(20, 0);
+        lrt.offsetMax = new Vector2(-10, 0);
+
+        CreateScrollView(left.transform, out _stepDrawerContent,
+            anchorMin: new Vector2(0, 0),
+            anchorMax: new Vector2(1, 1),
+            padding: new Vector4(10, 10, 10, 10));
+
+        var right = CreatePanel(_inspectionPanel.transform, "RightMain", C_CARD, true);
+        AddBorder(right, C_BORDER);
+        var rrt = right.GetComponent<RectTransform>();
+        rrt.anchorMin = new Vector2(0.30f, 0.02f);
+        rrt.anchorMax = new Vector2(1, 0.92f);
+        rrt.offsetMin = new Vector2(10, 0);
+        rrt.offsetMax = new Vector2(-20, 0);
+
+        _inspectTitle = CreateText(right.transform, "Title", "—", 26, TextAnchor.UpperLeft, C_TEXT);
+        _inspectTitle.rectTransform.anchorMin = new Vector2(0, 0.86f);
+        _inspectTitle.rectTransform.anchorMax = new Vector2(1, 1);
+        _inspectTitle.rectTransform.offsetMin = new Vector2(18, 0);
+        _inspectTitle.rectTransform.offsetMax = new Vector2(-18, -10);
+
+        _inspectProgress = CreateText(right.transform, "Progress", "—", 18, TextAnchor.UpperLeft, C_SUB);
+        _inspectProgress.rectTransform.anchorMin = new Vector2(0, 0.80f);
+        _inspectProgress.rectTransform.anchorMax = new Vector2(1, 0.86f);
+        _inspectProgress.rectTransform.offsetMin = new Vector2(18, 0);
+        _inspectProgress.rectTransform.offsetMax = new Vector2(-18, 0);
+
+        _inspectPointName = CreateText(right.transform, "PointName", "—", 22, TextAnchor.UpperLeft, C_TEXT);
+        _inspectPointName.rectTransform.anchorMin = new Vector2(0, 0.70f);
+        _inspectPointName.rectTransform.anchorMax = new Vector2(1, 0.80f);
+        _inspectPointName.rectTransform.offsetMin = new Vector2(18, 0);
+        _inspectPointName.rectTransform.offsetMax = new Vector2(-18, 0);
+
+        _inspectInstruction = CreateText(right.transform, "Instruction", "—", 18, TextAnchor.UpperLeft, C_SUB);
+        _inspectInstruction.rectTransform.anchorMin = new Vector2(0, 0.58f);
+        _inspectInstruction.rectTransform.anchorMax = new Vector2(1, 0.70f);
+        _inspectInstruction.rectTransform.offsetMin = new Vector2(18, 0);
+        _inspectInstruction.rectTransform.offsetMax = new Vector2(-18, 0);
+
+        _inspectNotes = CreateInput(right.transform, "Notes", "Notes (optional)");
+        var nrt = _inspectNotes.GetComponent<RectTransform>();
+        nrt.anchorMin = new Vector2(0, 0.42f);
+        nrt.anchorMax = new Vector2(1, 0.56f);
+        nrt.offsetMin = new Vector2(18, 0);
+        nrt.offsetMax = new Vector2(-18, 0);
+
+        // Buttons row
+        _inspectPassBtn = CreateButton(right.transform, "Pass", "PASS", C_SUCCESS, true);
+        var prt = _inspectPassBtn.GetComponent<RectTransform>();
+        prt.anchorMin = new Vector2(0, 0.32f);
+        prt.anchorMax = new Vector2(0.32f, 0.40f);
+        Stretch(prt, 10, 6, 6, 6);
+
+        _inspectFailBtn = CreateButton(right.transform, "Fail", "FAIL", C_DANGER, true);
+        var frt = _inspectFailBtn.GetComponent<RectTransform>();
+        frt.anchorMin = new Vector2(0.34f, 0.32f);
+        frt.anchorMax = new Vector2(0.66f, 0.40f);
+        Stretch(frt, 6, 6, 6, 6);
+
+        _inspectClearBtn = CreateButton(right.transform, "Clear", "CLEAR", Hex("#2A3338"), true);
+        var crt = _inspectClearBtn.GetComponent<RectTransform>();
+        crt.anchorMin = new Vector2(0.68f, 0.32f);
+        crt.anchorMax = new Vector2(1.0f, 0.40f);
+        Stretch(crt, 6, 10, 6, 6);
+
+        // Navigation & photo
+        _inspectPrevBtn = CreateButton(right.transform, "Prev", "← PREV", Hex("#2A3338"), true);
+        var prevrt = _inspectPrevBtn.GetComponent<RectTransform>();
+        prevrt.anchorMin = new Vector2(0, 0.20f);
+        prevrt.anchorMax = new Vector2(0.32f, 0.28f);
+        Stretch(prevrt, 10, 6, 6, 6);
+
+        _inspectNextBtn = CreateButton(right.transform, "Next", "NEXT →", C_PRIMARY, true);
+        var nextrt = _inspectNextBtn.GetComponent<RectTransform>();
+        nextrt.anchorMin = new Vector2(0.34f, 0.20f);
+        nextrt.anchorMax = new Vector2(0.66f, 0.28f);
+        Stretch(nextrt, 6, 6, 6, 6);
+
+        _inspectPhotoBtn = CreateButton(right.transform, "Photo", "TAKE PHOTO", C_ACCENT, true);
+        var photort = _inspectPhotoBtn.GetComponent<RectTransform>();
+        photort.anchorMin = new Vector2(0.68f, 0.20f);
+        photort.anchorMax = new Vector2(1.0f, 0.28f);
+        Stretch(photort, 6, 10, 6, 6);
+
+        _inspectPhotoCount = CreateText(right.transform, "PhotoCount", "Photos: 0", 16, TextAnchor.UpperLeft, C_SUB);
+        _inspectPhotoCount.rectTransform.anchorMin = new Vector2(0, 0.14f);
+        _inspectPhotoCount.rectTransform.anchorMax = new Vector2(0.5f, 0.20f);
+        _inspectPhotoCount.rectTransform.offsetMin = new Vector2(18, 0);
+        _inspectPhotoCount.rectTransform.offsetMax = new Vector2(-18, 0);
+
+        _inspectPhotoPreview = new GameObject("Preview", typeof(RectTransform), typeof(RawImage)).GetComponent<RawImage>();
+        _inspectPhotoPreview.transform.SetParent(right.transform, false);
+        var pvr = _inspectPhotoPreview.GetComponent<RectTransform>();
+        pvr.anchorMin = new Vector2(0.0f, 0.02f);
+        pvr.anchorMax = new Vector2(0.48f, 0.14f);
+        Stretch(pvr, 18, 6, 6, 6);
+        _inspectPhotoPreview.color = Color.white;
+
+        _inspectFinishBtn = CreateButton(right.transform, "Finish", "FINISH RUN", C_WARN, true);
+        var finrt = _inspectFinishBtn.GetComponent<RectTransform>();
+        finrt.anchorMin = new Vector2(0.52f, 0.02f);
+        finrt.anchorMax = new Vector2(1.0f, 0.14f);
+        Stretch(finrt, 6, 18, 6, 6);
+
+        // Wire logic
+        _inspectPassBtn.onClick.AddListener(() =>
+        {
+            SetCurrentStepStatus(StepStatus.Pass);
+            Toast("Marked PASS");
+            RefreshInspectionUI();
+        });
+
+        _inspectFailBtn.onClick.AddListener(() =>
+        {
+            SetCurrentStepStatus(StepStatus.Fail);
+            Toast("Marked FAIL");
+            RefreshInspectionUI();
+        });
+
+        _inspectClearBtn.onClick.AddListener(() =>
+        {
+            var step = GetCurrentStep();
+            if (step != null)
+            {
+                step.status = StepStatus.NotDone;
+                // keep photos; clear only notes
+                step.notes = "";
+                _inspectNotes.text = "";
+            }
+            Toast("Cleared");
+            RefreshInspectionUI();
+        });
+
+        _inspectPrevBtn.onClick.AddListener(() =>
+        {
+            if (_activeRun == null) return;
+            _activeStepIndex = Mathf.Max(0, _activeStepIndex - 1);
+            RefreshInspectionUI();
+        });
+
+        _inspectNextBtn.onClick.AddListener(() =>
+        {
+            if (_activeRun == null) return;
+            _activeStepIndex = Mathf.Min(_activeRun.results.Count - 1, _activeStepIndex + 1);
+            RefreshInspectionUI();
+        });
+
+        _inspectPhotoBtn.onClick.AddListener(() =>
+        {
+            CaptureEvidencePlaceholder();
+            RefreshInspectionUI();
+            Toast("Photo saved");
+        });
+
+        _inspectFinishBtn.onClick.AddListener(() =>
+        {
+            FinishRun();
+        });
+
+        _inspectNotes.onEndEdit.AddListener(val =>
+        {
+            var step = GetCurrentStep();
+            if (step != null) step.notes = val?.Trim() ?? "";
+        });
+    }
+
+    void RefreshInspectionUI()
+    {
+        if (_activeRun == null || _selectedTemplate == null) return;
+
+        // Drawer list of steps
+        ClearChildren(_stepDrawerContent);
+        for (int i = 0; i < _selectedTemplate.points.Count; i++)
+        {
+            int idx = i;
+            var p = _selectedTemplate.points[i];
+            var step = _activeRun.results[idx];
+
+            var item = CreateListCard(_stepDrawerContent,
+                $"{idx + 1}. {p.name}",
+                $"Status: {step.status}",
+                () =>
+                {
+                    _activeStepIndex = idx;
+                    RefreshInspectionUI();
+                });
+            var img = item.GetComponent<Image>();
+            img.color = (idx == _activeStepIndex) ? Hex("#162026") : Hex("#12171A");
+        }
+
+        var total = _selectedTemplate.points.Count;
+        var currentPoint = _selectedTemplate.points[_activeStepIndex];
+        var currentStep = _activeRun.results[_activeStepIndex];
+
+        _inspectTitle.text = $"{_selectedModel.displayName} — {_selectedTemplate.templateName}";
+        var doneCount = _activeRun.results.FindAll(r => r.status != StepStatus.NotDone).Count;
+        _inspectProgress.text = $"Step {_activeStepIndex + 1}/{total} — Done {doneCount}/{total}";
+
+        _inspectPointName.text = currentPoint.name;
+        _inspectInstruction.text = $"{currentPoint.instruction}\nTOL: {currentPoint.tolerance}";
+        _inspectNotes.text = currentStep.notes ?? "";
+
+        _inspectPrevBtn.interactable = _activeStepIndex > 0;
+        _inspectNextBtn.interactable = _activeStepIndex < total - 1;
+
+        _inspectPhotoCount.text = $"Photos: {currentStep.photos.Count}";
+        if (currentStep.photos.Count > 0)
+        {
+            var last = currentStep.photos[currentStep.photos.Count - 1];
+            LoadPreview(last.filePath);
+        }
+        else
+        {
+            _inspectPhotoPreview.texture = null;
+        }
+
+        // Finish button enabled if at least one step is done; allow finishing any time
+        _inspectFinishBtn.interactable = true;
+    }
+
+    void BeginRun()
+    {
+        _activeRun = new InspectionRun
+        {
+            runId = Persist.NewId("run"),
+            modelId = _selectedModel.id,
+            modelName = _selectedModel.displayName,
+            operatorName = PlayerPrefs.GetString("user_name", "Operator"),
+            startedAt = Persist.Now(),
+            finishedAt = ""
+        };
+
+        _activeRun.results = new List<StepResult>();
+        foreach (var p in _selectedTemplate.points)
+        {
+            _activeRun.results.Add(new StepResult
+            {
+                pointId = p.id,
+                status = StepStatus.NotDone,
+                notes = "",
+                photos = new List<EvidencePhoto>()
+            });
+        }
+
+        _activeStepIndex = 0;
+        RefreshInspectionUI();
+    }
+
+    void FinishRun()
+    {
+        if (_activeRun == null) return;
+        _activeRun.finishedAt = Persist.Now();
+        Persist.AddRun(_activeRun);
+        Toast("Run saved");
+        PushAndGo(ScreenId.Report);
+    }
+
+    StepResult GetCurrentStep()
+    {
+        if (_activeRun == null) return null;
+        if (_activeStepIndex < 0 || _activeStepIndex >= _activeRun.results.Count) return null;
+        return _activeRun.results[_activeStepIndex];
+    }
+
+    void SetCurrentStepStatus(StepStatus status)
+    {
+        var step = GetCurrentStep();
+        if (step != null) step.status = status;
+    }
+
+    void CaptureEvidencePlaceholder()
+    {
+        var step = GetCurrentStep();
+        if (step == null) return;
+
+        // Create a simple placeholder texture (solid JD yellow with a timestamp line)
+        int w = 480, h = 270;
+        var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+        var pixels = new Color[w * h];
+        for (int i = 0; i < pixels.Length; i++) pixels[i] = C_ACCENT; // JD yellow
+        tex.SetPixels(pixels);
+        tex.Apply();
+
+        var png = tex.EncodeToPNG();
+        var path = Persist.EvidencePathFor(_activeRun.runId, _activeStepIndex);
+        File.WriteAllBytes(path, png);
+
+        step.photos.Add(new EvidencePhoto
+        {
+            filePath = path,
+            takenAt = Persist.Now()
+        });
+
+        // Also update preview in memory
+        _previewTex = tex;
+        _inspectPhotoPreview.texture = _previewTex;
+    }
+
+    void LoadPreview(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) { _inspectPhotoPreview.texture = null; return; }
+            var bytes = File.ReadAllBytes(path);
+            if (_previewTex == null) _previewTex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            _previewTex.LoadImage(bytes);
+            _inspectPhotoPreview.texture = _previewTex;
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"Preview load error: {e.Message}");
+            _inspectPhotoPreview.texture = null;
+        }
+    }
+
+    // REPORT
+    void BuildReportScreen()
+    {
+        _reportPanel = CreateScreen("ReportScreen");
+        CreateTopBar(_reportPanel.transform, "REPORT", true, () => GoBack(), "EXPORT PDF", () => Toast("PDF export coming next"));
+
+        var card = CreatePanel(_reportPanel.transform, "ReportCard", C_CARD, true);
+        AddBorder(card, C_BORDER);
+        var rt = card.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.02f, 0.06f);
+        rt.anchorMax = new Vector2(0.98f, 0.90f);
+        rt.offsetMin = new Vector2(0, 0);
+        rt.offsetMax = new Vector2(0, 0);
+
+        _reportHeader = CreateText(card.transform, "Header", "—", 22, TextAnchor.UpperLeft, C_TEXT);
+        _reportHeader.rectTransform.anchorMin = new Vector2(0, 0.88f);
+        _reportHeader.rectTransform.anchorMax = new Vector2(1, 1);
+        _reportHeader.rectTransform.offsetMin = new Vector2(18, 0);
+        _reportHeader.rectTransform.offsetMax = new Vector2(-18, -10);
+
+        CreateScrollView(card.transform, out _reportResultsContent,
+            anchorMin: new Vector2(0, 0),
+            anchorMax: new Vector2(1, 0.88f),
+            padding: new Vector4(16, 16, 16, 16));
+    }
+
+    void RefreshReportUI()
+    {
+        ClearChildren(_reportResultsContent);
+
+        if (_activeRun == null || _selectedTemplate == null)
+        {
+            _reportHeader.text = "No active run.";
+            return;
+        }
+
+        int total = _activeRun.results.Count;
+        int pass = _activeRun.results.FindAll(r => r.status == StepStatus.Pass).Count;
+        int fail = _activeRun.results.FindAll(r => r.status == StepStatus.Fail).Count;
+
+        _reportHeader.text =
+            $"{_activeRun.modelName} — {_selectedTemplate.templateName}\n" +
+            $"Operator: {_activeRun.operatorName}\n" +
+            $"Started: {_activeRun.startedAt}   Finished: {_activeRun.finishedAt}\n" +
+            $"Summary: PASS {pass} / FAIL {fail} / TOTAL {total}";
+
+        for (int i = 0; i < total; i++)
+        {
+            var p = _selectedTemplate.points[i];
+            var r = _activeRun.results[i];
+
+            var row = CreatePanel(_reportResultsContent, $"Row_{i}", Hex("#12171A"), true);
+            AddBorder(row, C_BORDER);
+            var rrt = row.GetComponent<RectTransform>();
+            rrt.sizeDelta = new Vector2(0, 160);
+
+            var title = CreateText(row.transform, "Title", $"{i + 1}. {p.name} — {r.status}", 20, TextAnchor.UpperLeft, C_TEXT);
+            title.rectTransform.anchorMin = new Vector2(0, 0.55f);
+            title.rectTransform.anchorMax = new Vector2(1, 1);
+            title.rectTransform.offsetMin = new Vector2(18, 0);
+            title.rectTransform.offsetMax = new Vector2(-18, -10);
+
+            var sub = CreateText(row.transform, "Sub",
+                $"Instr: {p.instruction}\nTol: {p.tolerance}\nNotes: {r.notes}\nPhotos: {r.photos.Count}",
+                16, TextAnchor.UpperLeft, C_SUB);
+            sub.rectTransform.anchorMin = new Vector2(0, 0);
+            sub.rectTransform.anchorMax = new Vector2(1, 0.55f);
+            sub.rectTransform.offsetMin = new Vector2(18, 10);
+            sub.rectTransform.offsetMax = new Vector2(-18, 10);
+        }
+    }
+
+    // ------------------------------------------------------------
+    // UI Factory Helpers
+    // ------------------------------------------------------------
+    GameObject CreateScreen(string name)
+    {
+        var go = new GameObject(name, typeof(RectTransform));
+        go.transform.SetParent(_safeArea, false);
+        Stretch(go.GetComponent<RectTransform>());
+        go.SetActive(false);
+        return go;
+    }
+
+    GameObject CreateTopBar(Transform parent, string title, bool showBack, Action backAction, string rightLabel, Action rightAction)
+    {
+        var bar = CreatePanel(parent, "TopBar", C_HEADER, false);
+        var rt = bar.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0, 0.94f);
+        rt.anchorMax = new Vector2(1, 1);
+        rt.offsetMin = Vector2.zero;
+        rt.offsetMax = Vector2.zero;
+
+        var border = CreatePanel(bar.transform, "BottomLine", C_PRIMARY, false);
+        var brt = border.GetComponent<RectTransform>();
+        brt.anchorMin = new Vector2(0, 0);
+        brt.anchorMax = new Vector2(1, 0);
+        brt.pivot = new Vector2(0.5f, 0);
+        brt.sizeDelta = new Vector2(0, 3);
+        brt.anchoredPosition = Vector2.zero;
+        border.GetComponent<Image>().raycastTarget = false;
+
+        var t = CreateText(bar.transform, "Title", title, 24, TextAnchor.MiddleCenter, C_TEXT);
+        Stretch(t.rectTransform, 20, 20, 0, 0);
+
+        if (showBack)
+        {
+            var back = CreateButton(bar.transform, "Back", "BACK", Hex("#2A3338"), true);
+            var btr = back.GetComponent<RectTransform>();
+            btr.anchorMin = new Vector2(0, 0.15f);
+            btr.anchorMax = new Vector2(0, 0.85f);
+            btr.pivot = new Vector2(0, 0.5f);
+            btr.sizeDelta = new Vector2(150, 0);
+            btr.anchoredPosition = new Vector2(12, 0);
+            back.onClick.AddListener(() => backAction?.Invoke());
+        }
+
+        if (!string.IsNullOrEmpty(rightLabel))
+        {
+            var right = CreateButton(bar.transform, "Right", rightLabel, C_PRIMARY, true);
+            var rrt = right.GetComponent<RectTransform>();
+            rrt.anchorMin = new Vector2(1, 0.15f);
+            rrt.anchorMax = new Vector2(1, 0.85f);
+            rrt.pivot = new Vector2(1, 0.5f);
+            rrt.sizeDelta = new Vector2(220, 0);
+            rrt.anchoredPosition = new Vector2(-12, 0);
+            right.onClick.AddListener(() => rightAction?.Invoke());
+        }
+
+        return bar;
+    }
+
+    GameObject CreatePanel(Transform parent, string name, Color bg, bool cardLike = false)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(Image));
+        go.transform.SetParent(parent, false);
+        var img = go.GetComponent<Image>();
+        img.color = bg;
+        img.raycastTarget = true;
+
+        if (cardLike)
+        {
+            var sh = go.AddComponent<Shadow>();
+            sh.effectColor = new Color(0, 0, 0, 0.35f);
+            sh.effectDistance = new Vector2(0, -2);
+        }
+
+        return go;
+    }
+
+    void AddBorder(GameObject go, Color borderColor)
+    {
+        var outline = go.AddComponent<Outline>();
+        outline.effectColor = borderColor;
+        outline.effectDistance = new Vector2(1.5f, -1.5f);
+        outline.useGraphicAlpha = true;
+    }
+
+    GameObject CreateCard(Transform parent, string name, Vector2 size)
+    {
+        var card = CreatePanel(parent, name, C_CARD, true);
+        AddBorder(card, C_BORDER);
+
+        var rt = card.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.5f, 0.5f);
+        rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = size;
+
+        return card;
+    }
+
+    Text CreateText(Transform parent, string name, string text, int size, TextAnchor align, Color color)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(Text));
+        go.transform.SetParent(parent, false);
+
+        var t = go.GetComponent<Text>();
+        t.font = _font;
+        t.text = text;
+        t.fontSize = size;
+        t.alignment = align;
+        t.color = color;
+        t.horizontalOverflow = HorizontalWrapMode.Wrap;
+        t.verticalOverflow = VerticalWrapMode.Overflow;
+
+        return t;
+    }
+
+    InputField CreateInput(Transform parent, string name, string placeholder)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(InputField));
+        go.transform.SetParent(parent, false);
+
+        var rt = go.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.5f, 0.5f);
+        rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = new Vector2(780, 58);
+
+        go.GetComponent<Image>().color = Hex("#101516");
+        AddBorder(go, C_BORDER);
+
+        var textGO = new GameObject("Text", typeof(RectTransform), typeof(Text));
+        textGO.transform.SetParent(go.transform, false);
+        var trt = textGO.GetComponent<RectTransform>();
+        Stretch(trt, 16, 16, 10, 10);
+
+        var text = textGO.GetComponent<Text>();
+        text.font = _font;
+        text.fontSize = 22;
+        text.alignment = TextAnchor.MiddleLeft;
+        text.color = C_TEXT;
+
+        var phGO = new GameObject("Placeholder", typeof(RectTransform), typeof(Text));
+        phGO.transform.SetParent(go.transform, false);
+        var prt = phGO.GetComponent<RectTransform>();
+        Stretch(prt, 16, 16, 10, 10);
+
+        var ph = phGO.GetComponent<Text>();
+        ph.font = _font;
+        ph.fontSize = 22;
+        ph.alignment = TextAnchor.MiddleLeft;
+        ph.color = C_MUTED;
+        ph.text = placeholder;
+
+        var input = go.GetComponent<InputField>();
+        input.textComponent = text;
+        input.placeholder = ph;
+        input.lineType = InputField.LineType.SingleLine;
+        input.characterLimit = 500;
+
+        return input;
+    }
+
+    Button CreateButton(Transform parent, string name, string label, Color bg, bool roundedLook)
+    {
+        var go = new GameObject(name, typeof(RectTransform), typeof(Image), typeof(Button));
+        go.transform.SetParent(parent, false);
+
+        var rt = go.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.5f, 0.5f);
+        rt.anchorMax = new Vector2(0.5f, 0.5f);
+        rt.pivot = new Vector2(0.5f, 0.5f);
+        rt.sizeDelta = new Vector2(520, 64);
+
+        var img = go.GetComponent<Image>();
+        img.color = bg;
+
+        if (roundedLook)
+        {
+            var outl = go.AddComponent<Outline>();
+            outl.effectColor = new Color(0, 0, 0, 0.35f);
+            outl.effectDistance = new Vector2(1, -1);
+        }
+
+        var t = CreateText(go.transform, "Label", label, 20, TextAnchor.MiddleCenter, Color.white);
+        Stretch(t.rectTransform, 12, 12, 10, 10);
+
+        return go.GetComponent<Button>();
+    }
+
+    Button CreateMiniButton(Transform parent, string name, string label, Color bg)
+    {
+        var b = CreateButton(parent, name, label, bg, true);
+        var rt = b.GetComponent<RectTransform>();
+        rt.sizeDelta = new Vector2(70, 56);
+        var lab = b.transform.Find("Label").GetComponent<Text>();
+        lab.fontSize = 16;
+        return b;
+    }
+
+    void SetButtonLabel(Button b, string label)
+    {
+        var t = b.transform.Find("Label")?.GetComponent<Text>();
+        if (t) t.text = label;
+    }
+
+    void CreateScrollView(Transform parent, out Transform contentOut, Vector2 anchorMin, Vector2 anchorMax, Vector4 padding)
+    {
+        var sv = new GameObject("ScrollView", typeof(RectTransform), typeof(Image), typeof(Mask), typeof(ScrollRect));
+        sv.transform.SetParent(parent, false);
+
+        var rt = sv.GetComponent<RectTransform>();
+        rt.anchorMin = anchorMin;
+        rt.anchorMax = anchorMax;
+        rt.offsetMin = new Vector2(padding.x, padding.w);
+        rt.offsetMax = new Vector2(-padding.y, -padding.z);
+
+        sv.GetComponent<Image>().color = new Color(0, 0, 0, 0);
+        sv.GetComponent<Mask>().showMaskGraphic = false;
+
+        var vp = new GameObject("Viewport", typeof(RectTransform), typeof(Image), typeof(Mask));
+        vp.transform.SetParent(sv.transform, false);
+        var vprt = vp.GetComponent<RectTransform>();
+        Stretch(vprt);
+        vp.GetComponent<Image>().color = new Color(1, 1, 1, 0.01f);
+        vp.GetComponent<Mask>().showMaskGraphic = false;
+
+        var content = new GameObject("Content", typeof(RectTransform));
+        content.transform.SetParent(vp.transform, false);
+        var crt = content.GetComponent<RectTransform>();
+        crt.anchorMin = new Vector2(0, 1);
+        crt.anchorMax = new Vector2(1, 1);
+        crt.pivot = new Vector2(0.5f, 1);
+        crt.anchoredPosition = Vector2.zero;
+        crt.sizeDelta = new Vector2(0, 0);
+
+        var layout = content.AddComponent<VerticalLayoutGroup>();
+        layout.spacing = 10;
+        layout.childAlignment = TextAnchor.UpperCenter;
+        layout.childControlHeight = true;
+        layout.childControlWidth = true;
+        layout.childForceExpandHeight = false;
+        layout.childForceExpandWidth = true;
+
+        var fitter = content.AddComponent<ContentSizeFitter>();
+        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+        fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+
+        var sr = sv.GetComponent<ScrollRect>();
+        sr.viewport = vprt;
+        sr.content = crt;
+        sr.horizontal = false;
+        sr.vertical = true;
+
+        contentOut = content.transform;
+    }
+
+    GameObject CreateListCard(Transform parent, string title, string subtitle, Action onClick)
+    {
+        var card = new GameObject("Item", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+        card.transform.SetParent(parent, false);
+
+        var img = card.GetComponent<Image>();
+        img.color = Hex("#12171A");
+
+        var le = card.GetComponent<LayoutElement>();
+        le.preferredHeight = 120;
+
+        var btn = card.GetComponent<Button>();
+        btn.onClick.AddListener(() => onClick?.Invoke());
+
+        var t = CreateText(card.transform, "Title", title, 22, TextAnchor.UpperLeft, C_TEXT);
+        t.rectTransform.anchorMin = new Vector2(0, 0.45f);
+        t.rectTransform.anchorMax = new Vector2(1, 1);
+        t.rectTransform.offsetMin = new Vector2(18, 0);
+        t.rectTransform.offsetMax = new Vector2(-18, -10);
+
+        var s = CreateText(card.transform, "Subtitle", subtitle, 16, TextAnchor.UpperLeft, C_SUB);
+        s.rectTransform.anchorMin = new Vector2(0, 0);
+        s.rectTransform.anchorMax = new Vector2(1, 0.45f);
+        s.rectTransform.offsetMin = new Vector2(18, 10);
+        s.rectTransform.offsetMax = new Vector2(-18, 10);
+
+        return card;
+    }
+
+    // ------------------------------------------------------------
+    // Utility Helpers (missing in your paste)
+    // ------------------------------------------------------------
+    static void Stretch(RectTransform rt, float left = 0, float right = 0, float bottom = 0, float top = 0)
+    {
+        rt.anchorMin = new Vector2(0, 0);
+        rt.anchorMax = new Vector2(1, 1);
+        rt.offsetMin = new Vector2(left, bottom);
+        rt.offsetMax = new Vector2(-right, -top);
+    }
+
+    static void ClearChildren(Transform t)
+    {
+        for (int i = t.childCount - 1; i >= 0; i--)
+        {
+            GameObject.Destroy(t.GetChild(i).gameObject);
+        }
+    }
+
+    static string ShortPath(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return "(none)";
+        if (path.Length <= 60) return path;
+        return "…" + path.Substring(path.Length - 60, 60);
+    }
+
+    static void PlaceMiniButton(RectTransform rt, int orderFromRight, float marginRight)
+    {
+        rt.anchorMin = new Vector2(1, 0.5f);
+        rt.anchorMax = new Vector2(1, 0.5f);
+        rt.pivot = new Vector2(1, 0.5f);
+        float spacing = rt.sizeDelta.x + 10;
+        rt.anchoredPosition = new Vector2(-(marginRight + spacing * (orderFromRight - 1)), 0);
+    }
+
+    static void PlaceButtonBottomRight(RectTransform rt, float marginX, float marginY)
+    {
+        rt.anchorMin = new Vector2(1, 0);
+        rt.anchorMax = new Vector2(1, 0);
+        rt.pivot = new Vector2(1, 0);
+        rt.anchoredPosition = new Vector2(-marginX, marginY);
+    }
+
+    static void PlaceButtonBottomLeft(RectTransform rt, float marginX, float marginY)
+    {
+        rt.anchorMin = new Vector2(0, 0);
+        rt.anchorMax = new Vector2(0, 0);
+        rt.pivot = new Vector2(0, 0);
+        rt.anchoredPosition = new Vector2(marginX, marginY);
+    }
+}
