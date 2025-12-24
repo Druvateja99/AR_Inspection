@@ -1,42 +1,151 @@
+
 // Assets/Scripts/RuntimeGltfLoader.cs
 using UnityEngine;
 using System.Threading.Tasks;
 using GLTFast;
 using GLTFast.Logging;
+using System;
+using System.IO;
 
 public class RuntimeGltfLoader : MonoBehaviour
 {
     /// <summary>
-    /// Loads a GLTF/GLB from a local sandbox path and parents it under 'parent'.
+    /// Loads a GLTF/GLB from a local path (preferably inside Application.persistentDataPath)
+    /// and parents the instantiated root under 'parent'.
+    ///
+    /// Supports:
+    ///  - .glb (single file)
+    ///  - .gltf (requires .bin + textures in the same folder)
+    ///
+    /// Returns null if load/instantiate fails.
     /// </summary>
     public async Task<GameObject> LoadGltf(string localPath, Transform parent)
     {
-        // Prefix with file:// for local file URI
-        var uri = localPath.StartsWith("file://") ? localPath : "file://" + localPath;
-        Debug.Log($"[GLTFast] Load request: {uri}");
-
-        var gltf = new GltfImport(logger: new ConsoleLogger());
-
-        var loadOk = await gltf.Load(uri);
-        if (!loadOk)
+        if (string.IsNullOrEmpty(localPath))
         {
-            Debug.LogError($"[GLTFast] Load() returned false. Path: {localPath}");
+            Debug.LogError("[GLTFast] LoadGltf: path is null/empty.");
             return null;
         }
 
+        // Basic preflight checks and helpful logging
+        var ext = Path.GetExtension(localPath).ToLowerInvariant();
+        if (ext != ".glb" && ext != ".gltf")
+        {
+            Debug.LogError($"[GLTFast] Unsupported extension '{ext}'. Use .glb or .gltf. Path: {localPath}");
+            return null;
+        }
+
+        if (!File.Exists(localPath))
+        {
+            Debug.LogError($"[GLTFast] File does not exist: {localPath}");
+            PrintNeighborFiles(localPath);
+            return null;
+        }
+
+        if (ext == ".gltf")
+        {
+            // .gltf relies on sidecar .bin and textures in the SAME folder
+            var dir = Path.GetDirectoryName(localPath);
+            var binCandidate = Path.Combine(dir ?? "", Path.GetFileNameWithoutExtension(localPath) + ".bin");
+            if (!File.Exists(binCandidate))
+            {
+                Debug.LogWarning($"[GLTFast] .gltf sidecar .bin missing: {binCandidate}. " +
+                                 "Ensure you copied the entire source folder (textures included).");
+                PrintNeighborFiles(localPath);
+            }
+        }
+
+        // Construct a robust file URI (file:///…)
+        string uri = BuildFileUri(localPath);
+        Debug.Log($"[GLTFast] Load request: {uri}");
+
+        var logger = new ConsoleLogger(); // logs into Unity Console
+        var gltf = new GltfImport(logger: logger);
+
+        // 1) Try loading via URI
+        bool loadOk = await gltf.Load(uri);
+
+        // 2) Fallback: try the raw path (GLTFast accepts string path too)
+        if (!loadOk)
+        {
+            Debug.LogWarning("[GLTFast] Primary URI load failed, trying raw path...");
+            loadOk = await gltf.Load(localPath);
+        }
+
+        // 3) If still failing, print more context
+        if (!loadOk)
+        {
+            Debug.LogError($"[GLTFast] Load() returned false. Path: {localPath}");
+            PrintNeighborFiles(localPath);
+            return null;
+        }
+
+        // Instantiate under a clean root
         var root = new GameObject("CAD_Runtime");
-        var instOk = await gltf.InstantiateMainSceneAsync(root.transform);
+        bool instOk = await gltf.InstantiateMainSceneAsync(root.transform);
         if (!instOk)
         {
             Debug.LogError("[GLTFast] InstantiateMainSceneAsync() returned false");
-            Object.Destroy(root);
+            Destroy(root);
             return null;
         }
 
         if (parent != null)
             root.transform.SetParent(parent, false);
 
+        // Normalize defaults
+        root.transform.localPosition = Vector3.zero;
+        root.transform.localRotation = Quaternion.identity;
+        root.transform.localScale    = Vector3.one;
+
         Debug.Log("[GLTFast] Model instantiated successfully.");
         return root;
+    }
+
+    /// <summary>
+    /// Builds a proper file URI for local paths, e.g. file:///Users/... or file:///C:/...
+    /// </summary>
+    private static string BuildFileUri(string localPath)
+    {
+        try
+        {
+            // If it is already an absolute URI, return as-is
+            if (Uri.TryCreate(localPath, UriKind.Absolute, out var existing) && existing.IsAbsoluteUri)
+                return existing.AbsoluteUri;
+
+            // Make an absolute file URI from a full path
+            var full = Path.GetFullPath(localPath);
+            var fileUri = new Uri(full);
+            // On Windows, ensure the scheme is file:///
+            if (!fileUri.IsAbsoluteUri || fileUri.Scheme != Uri.UriSchemeFile)
+            {
+                fileUri = new Uri(new Uri("file://"), new Uri(full));
+            }
+            return fileUri.AbsoluteUri;
+        }
+        catch (Exception e)
+        {
+            // Safe fallback
+            Debug.LogWarning($"[GLTFast] BuildFileUri failed: {e.Message}. Falling back.");
+            return localPath.StartsWith("file://", StringComparison.OrdinalIgnoreCase)
+                ? localPath
+                : "file://" + localPath;
+        }
+    }
+
+    /// <summary>
+    /// Prints the directory contents next to the path to help diagnose .gltf sidecar issues.
+    /// </summary>
+    private static void PrintNeighborFiles(string localPath)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(localPath);
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+
+            var files = Directory.GetFiles(dir);
+            Debug.Log($"[GLTFast] Neighbor files in '{dir}':\n - " + string.Join("\n - ", files));
+        }
+        catch { /* best effort */ }
     }
 }
