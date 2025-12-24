@@ -1,34 +1,42 @@
-
+// Assets/Scripts/RuntimeGltfLoader.cs
 using UnityEngine;
-using GLTFast;
 using System.Threading.Tasks;
+using GLTFast;
+using GLTFast.Logging;
 
 public class RuntimeGltfLoader : MonoBehaviour
 {
-    // This method loads a GLTF/GLB file from a local path and attaches it to a parent
+    /// <summary>
+    /// Loads a GLTF/GLB from a local sandbox path and parents it under 'parent'.
+    /// </summary>
     public async Task<GameObject> LoadGltf(string localPath, Transform parent)
     {
-        // Add "file://" prefix for local files
-        var uri = "file://" + localPath;
+        // Prefix with file:// for local file URI
+        var uri = localPath.StartsWith("file://") ? localPath : "file://" + localPath;
+        Debug.Log($"[GLTFast] Load request: {uri}");
 
-        // Create a glTF importer
-        var gltf = new GltfImport();
+        var gltf = new GltfImport(logger: new ConsoleLogger());
 
-        // Load the file
-        var success = await gltf.Load(uri);
-        if (!success)
+        var loadOk = await gltf.Load(uri);
+        if (!loadOk)
         {
-            Debug.LogError("GLTF load failed: " + localPath);
+            Debug.LogError($"[GLTFast] Load() returned false. Path: {localPath}");
             return null;
         }
 
-        // Create a root GameObject for the model
         var root = new GameObject("CAD_Runtime");
-        await gltf.InstantiateMainSceneAsync(root.transform);
+        var instOk = await gltf.InstantiateMainSceneAsync(root.transform);
+        if (!instOk)
+        {
+            Debug.LogError("[GLTFast] InstantiateMainSceneAsync() returned false");
+            Object.Destroy(root);
+            return null;
+        }
 
-        // Attach to parent (e.g., AR model parent)
-        root.transform.SetParent(parent, false);
+        if (parent != null)
+            root.transform.SetParent(parent, false);
 
+        Debug.Log("[GLTFast] Model instantiated successfully.");
         return root;
     }
 }
