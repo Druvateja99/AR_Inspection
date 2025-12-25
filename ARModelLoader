@@ -1,15 +1,12 @@
 
+// Assets/Scripts/AR/ARModelLoader.cs
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
-using UnityEngine.EventSystems;
+using Unity.XR.CoreUtils;
 
-/// <summary>
-/// Loads a CAD model at runtime, makes it transparent for AR overlay,
-/// and lets the user place/adjust it in the real world.
-/// Keep your UI/checklist script separate.
-/// </summary>
 public class ARModelLoader : MonoBehaviour
 {
     [Header("AR Managers (assign from scene)")]
@@ -29,23 +26,31 @@ public class ARModelLoader : MonoBehaviour
     public float scaleStep = 0.02f;            // per tap
 
     // Internal
-    private static List<ARRaycastHit> s_Hits = new List<ARRaycastHit>();
+    private static readonly List<ARRaycastHit> s_Hits = new List<ARRaycastHit>();
     private Camera arCamera;
 
     void Awake()
     {
-        if (xrOrigin == null) xrOrigin = FindObjectOfType<XROrigin>();
-        if (raycastManager == null) raycastManager = FindObjectOfType<ARRaycastManager>();
-        if (planeManager == null) planeManager = FindObjectOfType<ARPlaneManager>();
-        if (arCameraManager == null) arCameraManager = FindObjectOfType<ARCameraManager>();
+        // Use new APIs to find managers
+        if (xrOrigin == null)       xrOrigin       = Object.FindFirstObjectByType<XROrigin>();
+        if (raycastManager == null) raycastManager = Object.FindAnyObjectByType<ARRaycastManager>();
+        if (planeManager == null)   planeManager   = Object.FindAnyObjectByType<ARPlaneManager>();
+        if (arCameraManager == null) arCameraManager = Object.FindAnyObjectByType<ARCameraManager>();
 
+        // Prefer XR Origin camera
         arCamera = xrOrigin != null ? xrOrigin.Camera : Camera.main;
+
+        // Default parent to XR Origin
         if (modelParent == null && xrOrigin != null) modelParent = xrOrigin.transform;
+
+        // Optional helpful logs
+        if (xrOrigin == null)       Debug.LogError("[ARModelLoader] Missing XROrigin in scene.");
+        if (raycastManager == null) Debug.LogWarning("[ARModelLoader] Missing ARRaycastManager (tap-to-place disabled).");
+        if (arCameraManager == null) Debug.LogWarning("[ARModelLoader] Missing ARCameraManager.");
     }
 
     void Update()
     {
-        // Optional: skip if no model yet
         if (currentModel == null) return;
 
         // Tap-to-place on planes
@@ -58,38 +63,41 @@ public class ARModelLoader : MonoBehaviour
             }
         }
 
-        // Simple keyboard controls for dev in Editor
 #if UNITY_EDITOR
+        // Simple dev keyboard rotate
         if (Input.GetKey(KeyCode.Q)) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime, Space.World);
         if (Input.GetKey(KeyCode.E)) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime, Space.World);
 #endif
     }
 
     /// <summary>
-    /// Call this after your user picks a CAD asset (already converted to FBX/GLTF and present in project or Addressables).
-    /// If you use Addressables/AssetBundles, load that prefab then pass to this method.
+    /// Called by your Align flow when a GLTF/GLB has been instantiated.
     /// </summary>
-    public void LoadModelPrefab(GameObject modelPrefab)
+    public void SetCurrentModel(GameObject go)
     {
+        if (go == null) { Debug.LogError("[ARModelLoader] SetCurrentModel received null."); return; }
+
         // Destroy previous
         if (currentModel != null) Destroy(currentModel);
 
-        // Instantiate under XROrigin (or a dedicated anchor parent)
-        currentModel = Instantiate(modelPrefab, modelParent);
-        currentModel.transform.localPosition = Vector3.zero;
-        currentModel.transform.localRotation = Quaternion.identity;
-        currentModel.transform.localScale   = Vector3.one;
+        currentModel = go;
 
-        // Apply transparent material to all renderers
+        // Parent & reset
+        if (modelParent != null && go.transform.parent != modelParent)
+            go.transform.SetParent(modelParent, false);
+
+        go.transform.localPosition = Vector3.zero;
+        go.transform.localRotation = Quaternion.identity;
+        go.transform.localScale    = Vector3.one;
+
+        // Apply transparent material
         ApplyTransparentMaterial(currentModel);
 
-        // Optional: start hidden until placed
-        // currentModel.SetActive(false);
+        Debug.Log("[ARModelLoader] Model assigned and ready for placement.");
     }
 
     /// <summary>
-    /// If you prefer to load by Resources path (simple demo).
-    /// E.g., put your GLTF/FBX prefab under Assets/Resources/CADModels/ and call with "CADModels/YourPrefabName"
+    /// If you load prefabs from Resources.
     /// </summary>
     public void LoadFromResources(string resourcesPath)
     {
@@ -99,7 +107,9 @@ public class ARModelLoader : MonoBehaviour
             Debug.LogError($"Resources.Load failed: {resourcesPath}");
             return;
         }
-        LoadModelPrefab(prefab);
+        // Instantiate a prefab and set as current
+        var go = Instantiate(prefab, modelParent);
+        SetCurrentModel(go);
     }
 
     /// <summary>
@@ -115,29 +125,18 @@ public class ARModelLoader : MonoBehaviour
             var hitPose = s_Hits[0].pose;
             currentModel.transform.position = hitPose.position;
             currentModel.transform.rotation = hitPose.rotation;
-
-            // Now visible if you initially hid it
-            // currentModel.SetActive(true);
         }
     }
 
-    /// <summary>
-    /// UI hook: Rotate left/right by buttons.
-    /// </summary>
+    // UI hooks for rotate/scale
     public void RotateLeft()  { if (currentModel) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime * 10f, Space.World); }
     public void RotateRight() { if (currentModel) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime * 10f, Space.World); }
+    public void ScaleUp()     { if (currentModel) currentModel.transform.localScale += Vector3.one * scaleStep; }
+    public void ScaleDown()   { if (currentModel) currentModel.transform.localScale  = Vector3.Max(currentModel.transform.localScale - Vector3.one * scaleStep, Vector3.one * 0.01f); }
 
-    /// <summary>
-    /// UI hook: Scale up/down by buttons.
-    /// </summary>
-    public void ScaleUp()   { if (currentModel) currentModel.transform.localScale += Vector3.one * scaleStep; }
-    public void ScaleDown() { if (currentModel) currentModel.transform.localScale  = Vector3.Max(currentModel.transform.localScale - Vector3.one * scaleStep, Vector3.one * 0.01f); }
-
-    /// <summary>
-    /// True if finger is over UGUI element, so we don't raycast the scene.
-    /// </summary>
     private bool IsPointerOverUI(Vector2 screenPos)
     {
+        if (EventSystem.current == null) return false;
         var ed = new PointerEventData(EventSystem.current) { position = screenPos };
         var results = new List<RaycastResult>();
         EventSystem.current.RaycastAll(ed, results);
@@ -148,18 +147,17 @@ public class ARModelLoader : MonoBehaviour
     {
         if (transparentMaterial == null)
         {
-            Debug.LogWarning("Transparent material not assigned. Using default materials.");
+            Debug.LogWarning("[ARModelLoader] Transparent material not assigned.");
             return;
         }
 
         var renderers = go.GetComponentsInChildren<Renderer>(true);
         foreach (var r in renderers)
         {
-            // Clone the material so alpha changes don’t affect the shared asset
             var mats = r.sharedMaterials;
             for (int i = 0; i < mats.Length; i++)
             {
-                mats[i] = new Material(transparentMaterial);
+                mats[i] = new Material(transparentMaterial); // clone
             }
             r.sharedMaterials = mats;
         }
