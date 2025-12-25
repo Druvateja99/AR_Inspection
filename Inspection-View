@@ -2,8 +2,9 @@
 // Assets/Scripts/Auth/InspectionARApp_TWYN_JD_UGUI.cs 
 // Unity 6.3 LTS (6000.3.x) - UGUI only, no TextMeshPro. 
 // TWYN-style industrial UI + John Deere green theme. 
-// Screens: Login → Home → Model Options → Checklist → Align (placeholder) → Inspection → Report. 
-// CAD/AR integration intentionally stubbed; plug in later without changing UI architecture.
+// Screens: Login → Home → Model Options → Checklist → Align → Inspection → Report. 
+// CAD/AR integration wired: runtime GLTF/GLB load into XR Simulation / device.
+
 using System; 
 using System.IO; 
 using System.Collections; 
@@ -12,17 +13,18 @@ using UnityEngine;
 using UnityEngine.UI; 
 using UnityEngine.EventSystems; 
 #if UNITY_EDITOR 
-using UnityEditor; // Editor file picker (runtime picker is stubbed) 
+using UnityEditor; // Editor file picker 
 #endif 
 #if ENABLE_INPUT_SYSTEM 
 using UnityEngine.InputSystem.UI; 
 #endif 
+
 public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour 
 { 
     // ===== Dev/testing switches ===== 
     [Header("Dev Options")] 
-    [SerializeField] private bool forceLoginOnStart = false; // set true if you always want Login screen on Play 
-    [SerializeField] private bool clearLoginPrefsOnPlay = false; // wipe stored login each Play 
+    [SerializeField] private bool forceLoginOnStart = false; 
+    [SerializeField] private bool clearLoginPrefsOnPlay = false; 
 
     // -------------------------------------------------------------------------------- 
     // Data Models 
@@ -31,7 +33,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     { 
         public string id; 
         public string displayName; 
-        public string sourcePath; 
+        public string sourcePath;      // NOTE: now stores sandbox path
         public string lastUsed; 
     } 
     [Serializable] public class ModelHistory { public List<ModelEntry> models = new List<ModelEntry>(); } 
@@ -81,15 +83,17 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     static class Persist 
     { 
         static string Root => Application.persistentDataPath; 
-        static string HistoryPath => Path.Combine(Root, "model_history.json"); 
+        static string HistoryPath   => Path.Combine(Root, "model_history.json"); 
         static string TemplatesPath => Path.Combine(Root, "checklist_templates.json"); 
-        static string RunsPath => Path.Combine(Root, "inspection_runs.json"); 
-        static string EvidenceDir => Path.Combine(Root, "evidence"); 
+        static string RunsPath      => Path.Combine(Root, "inspection_runs.json"); 
+        static string EvidenceDir   => Path.Combine(Root, "evidence"); 
+
         public static void EnsureDirs() 
         { 
             if (!Directory.Exists(Root)) Directory.CreateDirectory(Root); 
             if (!Directory.Exists(EvidenceDir)) Directory.CreateDirectory(EvidenceDir); 
         } 
+
         static T Load<T>(string path) where T : new() 
         { 
             try 
@@ -113,12 +117,14 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             } 
             catch (Exception e) { Debug.LogError($"Save error ({path}): {e.Message}"); } 
         } 
-        public static ModelHistory LoadHistory() => Load<ModelHistory>(HistoryPath); 
-        public static void SaveHistory(ModelHistory h) => Save(HistoryPath, h); 
-        public static TemplateStore LoadTemplates() => Load<TemplateStore>(TemplatesPath); 
-        public static void SaveTemplates(TemplateStore t) => Save(TemplatesPath, t); 
-        public static RunStore LoadRuns() => Load<RunStore>(RunsPath); 
-        public static void SaveRuns(RunStore r) => Save(RunsPath, r); 
+
+        public static ModelHistory   LoadHistory()   => Load<ModelHistory>(HistoryPath); 
+        public static void           SaveHistory(ModelHistory h) => Save(HistoryPath, h); 
+        public static TemplateStore  LoadTemplates() => Load<TemplateStore>(TemplatesPath); 
+        public static void           SaveTemplates(TemplateStore t) => Save(TemplatesPath, t); 
+        public static RunStore       LoadRuns()      => Load<RunStore>(RunsPath); 
+        public static void           SaveRuns(RunStore r) => Save(RunsPath, r); 
+
         public static void UpsertModel(ModelEntry m) 
         { 
             var hist = LoadHistory(); 
@@ -127,11 +133,12 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             else 
             { 
                 ex.displayName = m.displayName; 
-                ex.sourcePath = m.sourcePath; 
-                ex.lastUsed = m.lastUsed; 
+                ex.sourcePath  = m.sourcePath;      // sandbox path persists here
+                ex.lastUsed    = m.lastUsed; 
             } 
             SaveHistory(hist); 
         } 
+
         public static ChecklistTemplate GetOrCreateTemplate(string modelId, string defaultName = "Default Checklist") 
         { 
             var store = LoadTemplates(); 
@@ -140,9 +147,9 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             { 
                 t = new ChecklistTemplate 
                 { 
-                    modelId = modelId, 
+                    modelId     = modelId, 
                     templateName = defaultName, 
-                    updatedOn = Now() 
+                    updatedOn    = Now() 
                 }; 
                 store.templates.Add(t); 
                 SaveTemplates(store); 
@@ -158,8 +165,8 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             else 
             { 
                 ex.templateName = template.templateName; 
-                ex.points = template.points; 
-                ex.updatedOn = template.updatedOn; 
+                ex.points       = template.points; 
+                ex.updatedOn    = template.updatedOn; 
             } 
             SaveTemplates(store); 
         } 
@@ -245,18 +252,18 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     // TWYN / JD Theme 
     // -------------------------------------------------------------------------------- 
     Font _font; 
-    Color C_BG => Hex("#0F1213"); 
-    Color C_CARD => Hex("#151A1C"); 
-    Color C_BORDER => Hex("#263034"); 
-    Color C_TEXT => Hex("#EAF0EE"); 
-    Color C_SUB => Hex("#AEB7B2"); 
-    Color C_MUTED => Hex("#6E7A74"); 
-    Color C_HEADER => Hex("#0E1510"); 
+    Color C_BG      => Hex("#0F1213"); 
+    Color C_CARD    => Hex("#151A1C"); 
+    Color C_BORDER  => Hex("#263034"); 
+    Color C_TEXT    => Hex("#EAF0EE"); 
+    Color C_SUB     => Hex("#AEB7B2"); 
+    Color C_MUTED   => Hex("#6E7A74"); 
+    Color C_HEADER  => Hex("#0E1510"); 
     Color C_PRIMARY => Hex("#367C2B"); // John Deere green 
-    Color C_ACCENT => Hex("#FFDE00"); // JD yellow 
+    Color C_ACCENT  => Hex("#FFDE00"); // JD yellow 
     Color C_SUCCESS => Hex("#2E7D32"); 
-    Color C_DANGER => Hex("#D7263D"); 
-    Color C_WARN => Hex("#FFB020"); 
+    Color C_DANGER  => Hex("#D7263D"); 
+    Color C_WARN    => Hex("#FFB020"); 
     static Color Hex(string hex) 
     { 
         if (ColorUtility.TryParseHtmlString(hex, out var c)) return c; 
@@ -264,7 +271,6 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     } 
 
     // ========================= NEW: Runtime AR/GLTF wiring =========================
-    // Dynamic glTF loader and AR helpers wired to the UI flow (Align screen)
     RuntimeGltfLoader _loader;          // dynamic GLTF/GLB loader component in scene
     ARModelLoader _arLoader;            // AR helper (tap-to-place/rotate/scale)
     Material _transparentMat;           // Transparent material for CAD overlay
@@ -279,7 +285,6 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             PlayerPrefs.DeleteKey("user_name"); 
             PlayerPrefs.Save(); 
         } 
-        // Unity 6: use LegacyRuntime.ttf for built-in font 
         _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); 
 
         BuildCanvas(); 
@@ -292,20 +297,17 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         BuildInspectionScreen(); 
         BuildReportScreen(); 
 
-        // Ensure overlay draws above screens 
         BringOverlaysToFront(); 
 
-        // ========================= NEW: Hook up runtime loader & AR =========================
-        _loader   = FindAnyObjectByType<RuntimeGltfLoader>(); 
-        _arLoader = FindAnyObjectByType<ARModelLoader>(); 
+        // ===== NEW: hook runtime loader & AR helpers =====
+        _loader   = UnityEngine.Object.FindAnyObjectByType<RuntimeGltfLoader>(); 
+        _arLoader = UnityEngine.Object.FindAnyObjectByType<ARModelLoader>(); 
 
-        // Try loading a pre-made transparent material from Resources.
-        // If not found, create a basic transparent Standard material at runtime.
         _transparentMat = Resources.Load<Material>("TransparentCAD"); 
         if (_transparentMat == null) 
         { 
             _transparentMat = new Material(Shader.Find("Standard")); 
-            _transparentMat.SetFloat("_Mode", 3); // Transparent 
+            _transparentMat.SetFloat("_Mode", 3); 
             _transparentMat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha); 
             _transparentMat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha); 
             _transparentMat.SetInt("_ZWrite", 0); 
@@ -314,7 +316,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             _transparentMat.renderQueue = 3000; 
             var c = _transparentMat.color; c.a = 0.4f; _transparentMat.color = c; 
         } 
-        // =============================================================================
+        // ================================================
 
         if (!forceLoginOnStart && PlayerPrefs.GetInt("is_logged_in", 0) == 1) 
             NavigateTo(ScreenId.Home, clearStack: true); 
@@ -343,11 +345,12 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         scaler.matchWidthOrHeight = 0.5f; 
         _root = canvasGO.GetComponent<RectTransform>(); 
         Stretch(_root); 
+
         var safeGO = new GameObject("SafeArea", typeof(RectTransform)); 
         safeGO.transform.SetParent(_root, false); 
         _safeArea = safeGO.GetComponent<RectTransform>(); 
         Stretch(_safeArea); 
-        // EventSystem (Unity 6) 
+
         var es = UnityEngine.Object.FindAnyObjectByType<EventSystem>(); 
         if (es == null) 
         { 
@@ -415,20 +418,20 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _inspectionPanel.SetActive(id == ScreenId.Inspection); 
         _reportPanel.SetActive(id == ScreenId.Report); 
 
-        if (id == ScreenId.Home) RefreshHistory(); 
+        if (id == ScreenId.Home)        RefreshHistory(); 
         if (id == ScreenId.ModelOptions) RefreshModelOptions(); 
-        if (id == ScreenId.Checklist) RefreshChecklistUI(); 
+        if (id == ScreenId.Checklist)    RefreshChecklistUI(); 
 
-        // ========================= NEW: load model in Align =========================
+        // ===== NEW: load model in Align =====
         if (id == ScreenId.Align) 
         { 
             RefreshAlignUI(); 
             EnableARAlign(); 
         } 
-        // ===========================================================================
+        // ====================================
 
         if (id == ScreenId.Inspection) RefreshInspectionUI(); 
-        if (id == ScreenId.Report) RefreshReportUI(); 
+        if (id == ScreenId.Report)     RefreshReportUI(); 
         BringOverlaysToFront(); 
     } 
 
@@ -437,13 +440,12 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     // -------------------------------------------------------------------------------- 
     void BuildCommonOverlays() 
     { 
-        // Toast 
         _toastGO = new GameObject("Toast", typeof(RectTransform), typeof(CanvasGroup), typeof(Image)); 
         _toastGO.transform.SetParent(_safeArea, false); 
         var rt = _toastGO.GetComponent<RectTransform>(); 
         rt.anchorMin = new Vector2(0.5f, 0); 
         rt.anchorMax = new Vector2(0.5f, 0); 
-        rt.pivot = new Vector2(0.5f, 0); 
+        rt.pivot     = new Vector2(0.5f, 0); 
         rt.anchoredPosition = new Vector2(0, 18); 
         rt.sizeDelta = new Vector2(920, 78); 
         _toastGO.GetComponent<Image>().color = new Color(0, 0, 0, 0.78f); 
@@ -453,31 +455,34 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _toastText = CreateText(_toastGO.transform, "ToastText", "Saved", 22, TextAnchor.MiddleCenter, Color.white); 
         Stretch(_toastText.rectTransform, 14, 14, 10, 10); 
 
-        // Modal blocker 
         _modalBlocker = new GameObject("ModalBlocker", typeof(RectTransform), typeof(Image)); 
         _modalBlocker.transform.SetParent(_safeArea, false); 
         Stretch(_modalBlocker.GetComponent<RectTransform>()); 
         _modalBlocker.GetComponent<Image>().color = new Color(0, 0, 0, 0.55f); 
         _modalBlocker.SetActive(false); 
+
         var card = CreateCard(_modalBlocker.transform, "ModalCard", new Vector2(980, 460)); 
         card.GetComponent<RectTransform>().anchoredPosition = Vector2.zero; 
+
         _modalTitle = CreateText(card.transform, "Title", "Title", 28, TextAnchor.MiddleLeft, C_TEXT); 
         _modalTitle.rectTransform.anchorMin = new Vector2(0, 1); 
         _modalTitle.rectTransform.anchorMax = new Vector2(1, 1); 
-        _modalTitle.rectTransform.pivot = new Vector2(0.5f, 1); 
+        _modalTitle.rectTransform.pivot     = new Vector2(0.5f, 1); 
         _modalTitle.rectTransform.sizeDelta = new Vector2(0, 70); 
         _modalTitle.rectTransform.anchoredPosition = new Vector2(0, -18); 
         _modalTitle.rectTransform.offsetMin = new Vector2(30, _modalTitle.rectTransform.offsetMin.y); 
         _modalTitle.rectTransform.offsetMax = new Vector2(-30, _modalTitle.rectTransform.offsetMax.y); 
+
         _modalBody = CreateText(card.transform, "Body", "Body", 20, TextAnchor.UpperLeft, C_SUB); 
         _modalBody.rectTransform.anchorMin = new Vector2(0, 0.26f); 
         _modalBody.rectTransform.anchorMax = new Vector2(1, 0.82f); 
         _modalBody.rectTransform.offsetMin = new Vector2(30, 0); 
         _modalBody.rectTransform.offsetMax = new Vector2(-30, 0); 
-        _modalPrimary = CreateButton(card.transform, "Primary", "OK", C_PRIMARY, true); 
+
+        _modalPrimary   = CreateButton(card.transform, "Primary",   "OK",     C_PRIMARY, true); 
         _modalSecondary = CreateButton(card.transform, "Secondary", "Cancel", Hex("#3B4449"), true); 
         PlaceButtonBottomRight(_modalPrimary.GetComponent<RectTransform>(), 30, 24); 
-        PlaceButtonBottomLeft(_modalSecondary.GetComponent<RectTransform>(), 30, 24); 
+        PlaceButtonBottomLeft (_modalSecondary.GetComponent<RectTransform>(), 30, 24); 
         _modalPrimary.onClick.AddListener(() => HideModal()); 
         _modalSecondary.onClick.AddListener(() => HideModal()); 
         BringOverlaysToFront(); 
@@ -485,12 +490,12 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     void BringOverlaysToFront() 
     { 
         if (_modalBlocker != null) _modalBlocker.transform.SetAsLastSibling(); 
-        if (_toastGO != null) _toastGO.transform.SetAsLastSibling(); 
+        if (_toastGO != null)      _toastGO.transform.SetAsLastSibling(); 
     } 
     void ShowModal(string title, string body, string primaryLabel, Action primaryAction, string secondaryLabel = null, Action secondaryAction = null) 
     { 
         _modalTitle.text = title; 
-        _modalBody.text = body; 
+        _modalBody.text  = body; 
         SetButtonLabel(_modalPrimary, primaryLabel ?? "OK"); 
         _modalPrimary.onClick.RemoveAllListeners(); 
         _modalPrimary.onClick.AddListener(() => 
@@ -542,7 +547,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     void BuildLoginScreen() 
     { 
         _loginPanel = CreateScreen("LoginScreen"); 
-        CreateTopBar(_loginPanel.transform, "INSPECTION", showBack: false, backAction: null, rightLabel: null, rightAction: null); 
+        CreateTopBar(_loginPanel.transform, "INSPECTION", false, null, null, null); 
         var card = CreateCard(_loginPanel.transform, "LoginCard", new Vector2(980, 560)); 
         card.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -30); 
         var title = CreateText(card.transform, "Title", "Sign In", 40, TextAnchor.MiddleCenter, C_TEXT); 
@@ -566,8 +571,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         { 
             var u = _loginUser.text?.Trim(); 
             var p = _loginPass.text?.Trim(); 
-            if (string.IsNullOrEmpty(u) ||
-                string.IsNullOrEmpty(p)) 
+            if (string.IsNullOrEmpty(u) || string.IsNullOrEmpty(p)) 
             { 
                 _loginError.text = "Enter username and password."; 
                 return; 
@@ -592,20 +596,13 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     void BuildHomeScreen() 
     { 
         _homePanel = CreateScreen("HomeScreen"); 
-        var topBar = CreateTopBar( 
-            _homePanel.transform, 
-            "RECENT MODELS", 
-            showBack: false, 
-            backAction: null, 
-            rightLabel: "+ ADD", 
-            rightAction: () => OnAddClicked() 
-        ); 
-        // Logout button on Home 
+        var topBar = CreateTopBar(_homePanel.transform, "RECENT MODELS", false, null, "+ ADD", () => OnAddClicked()); 
+
         var logoutBtn = CreateButton(topBar.transform, "LogoutBtn", "LOGOUT", Hex("#2A3338"), true); 
         var lrt = logoutBtn.GetComponent<RectTransform>(); 
         lrt.anchorMin = new Vector2(1, 0.15f); 
         lrt.anchorMax = new Vector2(1, 0.85f); 
-        lrt.pivot = new Vector2(1, 0.5f); 
+        lrt.pivot     = new Vector2(1, 0.5f); 
         lrt.sizeDelta = new Vector2(200, 0); 
         lrt.anchoredPosition = new Vector2(-250, 0); 
         logoutBtn.onClick.RemoveAllListeners(); 
@@ -620,11 +617,13 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             Toast("Signed out"); 
             NavigateTo(ScreenId.Login, clearStack: true); 
         }); 
+
         _homeWelcome = CreateText(_homePanel.transform, "Welcome", "", 20, TextAnchor.UpperLeft, C_SUB); 
         _homeWelcome.rectTransform.anchorMin = new Vector2(0, 0.86f); 
         _homeWelcome.rectTransform.anchorMax = new Vector2(1, 0.94f); 
         _homeWelcome.rectTransform.offsetMin = new Vector2(26, 0); 
         _homeWelcome.rectTransform.offsetMax = new Vector2(-26, 0); 
+
         var listCard = CreatePanel(_homePanel.transform, "ListCard", C_CARD, true); 
         AddBorder(listCard, C_BORDER); 
         var listRT = listCard.GetComponent<RectTransform>(); 
@@ -632,10 +631,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         listRT.anchorMax = new Vector2(1, 0.86f); 
         listRT.offsetMin = new Vector2(20, 16); 
         listRT.offsetMax = new Vector2(-20, -10); 
-        CreateScrollView(listCard.transform, out _historyContent, 
-            anchorMin: new Vector2(0, 0), 
-            anchorMax: new Vector2(1, 1), 
-            padding: new Vector4(16, 16, 16, 16)); 
+        CreateScrollView(listCard.transform, out _historyContent, new Vector2(0, 0), new Vector2(1, 1), new Vector4(16, 16, 16, 16)); 
     } 
     void RefreshHistory() 
     { 
@@ -645,35 +641,27 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         hist.models.Sort((a, b) => string.Compare(b.lastUsed, a.lastUsed)); 
         if (hist.models.Count == 0) 
         { 
-            var empty = CreateText(_historyContent, "Empty", 
-                "No models added yet.\nTap + ADD to begin.", 
-                22, TextAnchor.MiddleCenter, C_SUB); 
+            var empty = CreateText(_historyContent, "Empty", "No models added yet.\nTap + ADD to begin.", 22, TextAnchor.MiddleCenter, C_SUB); 
             empty.rectTransform.sizeDelta = new Vector2(0, 260); 
             return; 
         } 
         foreach (var m in hist.models) 
         { 
-            var card = CreateListCard(_historyContent, 
-                m.displayName, 
-                $"Last used: {m.lastUsed}\n{ShortPath(m.sourcePath)}", 
-                () => 
-                { 
-                    _selectedModel = m; 
-                    _selectedTemplate = Persist.GetOrCreateTemplate(m.id); 
-                    PushAndGo(ScreenId.ModelOptions); 
-                }); 
+            var card = CreateListCard(_historyContent, m.displayName, $"Last used: {m.lastUsed}\n{ShortPath(m.sourcePath)}", () => 
+            { 
+                _selectedModel   = m; 
+                _selectedTemplate = Persist.GetOrCreateTemplate(m.id); 
+                PushAndGo(ScreenId.ModelOptions); 
+            }); 
             AddBorder(card, C_BORDER); 
         } 
     } 
+
     // + ADD behavior: file picker in Editor, modal input otherwise 
     void OnAddClicked() 
     { 
 #if UNITY_EDITOR 
-        string path = EditorUtility.OpenFilePanel( 
-            "Select CAD / Mesh File", 
-            "", 
-            "step,stp,obj,fbx,glb,gltf,stl" 
-        ); 
+        string path = EditorUtility.OpenFilePanel("Select CAD / Mesh File", "", "glb,gltf,obj,fbx,stl"); 
         if (string.IsNullOrEmpty(path)) 
         { 
             Toast("No file selected"); 
@@ -684,103 +672,163 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         ShowAddModelModal(); 
 #endif 
     } 
+
+    // ===== NEW: copy selected file/folder into app sandbox (persistentDataPath) =====
+    string EnsureInSandbox(string originalPath)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(originalPath)) return originalPath;
+
+            var ext = Path.GetExtension(originalPath).ToLowerInvariant();
+
+            // For .gltf (JSON + external .bin/textures), copy the entire source folder recursively
+            if (ext == ".gltf")
+            {
+                var srcDir = Path.GetDirectoryName(originalPath);
+                if (string.IsNullOrEmpty(srcDir) || !Directory.Exists(srcDir))
+                {
+                    Debug.LogError($"[Sandbox] Source dir missing for .gltf: {srcDir}");
+                    return originalPath;
+                }
+
+                // Put under a folder named after the gltf file (without extension)
+                var dstDir = Path.Combine(Application.persistentDataPath, Path.GetFileNameWithoutExtension(originalPath));
+                DirectoryCopy(srcDir, dstDir, true);
+
+                var sandboxGltf = Path.Combine(dstDir, Path.GetFileName(originalPath));
+                Debug.Log($"[Sandbox] Copied .gltf folder to: {dstDir}");
+                return sandboxGltf;
+            }
+            else
+            {
+                // For .glb (single file) or other single-file assets, copy the file
+                var dstFile = Path.Combine(Application.persistentDataPath, Path.GetFileName(originalPath));
+                File.Copy(originalPath, dstFile, overwrite: true);
+                Debug.Log($"[Sandbox] Copied file to: {dstFile}");
+                return dstFile;
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[Sandbox] Copy failed: {e.Message}");
+            return originalPath; // best effort fallback
+        }
+    }
+
+    // Recursive directory copy helper
+    static void DirectoryCopy(string sourceDirName, string destDirName, bool copySubDirs)
+    {
+        var dir = new DirectoryInfo(sourceDirName);
+        if (!dir.Exists) return;
+
+        Directory.CreateDirectory(destDirName);
+
+        // Copy files
+        foreach (var file in dir.GetFiles())
+        {
+            string temppath = Path.Combine(destDirName, file.Name);
+            file.CopyTo(temppath, true);
+        }
+
+        // Copy subdirectories
+        if (copySubDirs)
+        {
+            foreach (var subdir in dir.GetDirectories())
+            {
+                string temppath = Path.Combine(destDirName, subdir.Name);
+                DirectoryCopy(subdir.FullName, temppath, copySubDirs);
+            }
+        }
+    }
+    // ==============================================================================
+
     void AddModelFromPath(string path, bool autoNavigateToOptions) 
     { 
+        // ===== NEW: ensure we store sandbox path in history =====
+        var sandboxPath = EnsureInSandbox(path);
+
         var name = Path.GetFileNameWithoutExtension(path); 
         var id = Persist.NewId("model"); 
         var m = new ModelEntry 
         { 
-            id = id, 
-            displayName = name, // automatic name from file 
-            sourcePath = path, 
-            lastUsed = Persist.Now() 
+            id          = id, 
+            displayName = name, 
+            sourcePath  = sandboxPath,   // store sandboxed path
+            lastUsed    = Persist.Now() 
         }; 
         Persist.UpsertModel(m); 
-        _selectedModel = m; 
+        _selectedModel    = m; 
         _selectedTemplate = Persist.GetOrCreateTemplate(m.id); 
         Toast("Model added"); 
         RefreshHistory(); 
-        if (autoNavigateToOptions) 
-            PushAndGo(ScreenId.ModelOptions); 
+        if (autoNavigateToOptions) PushAndGo(ScreenId.ModelOptions); 
     } 
-    // Manual modal input (for non-editor builds until we add native picker) 
+
+    // Manual modal input (runtime stub)
     void ShowAddModelModal() 
     { 
-        ShowModal( 
-            "Add Model", 
-            "Runtime file picker will be added later (iPad Files app).\n\nFor now, enter a name + a reference path.", 
-            "CONTINUE", 
-            () => 
+        ShowModal("Add Model", "Runtime file picker will be added later (iPad Files app).\n\nFor now, enter a name + a reference path.", "CONTINUE", () => 
+        { 
+            var modalCard = _modalTitle.transform.parent; 
+            var old = modalCard.Find("DynamicInputs"); 
+            if (old != null) Destroy(old.gameObject); 
+            var dyn = new GameObject("DynamicInputs", typeof(RectTransform)); 
+            dyn.transform.SetParent(modalCard, false); 
+            var drt = dyn.GetComponent<RectTransform>(); 
+            drt.anchorMin = new Vector2(0, 0.30f); 
+            drt.anchorMax = new Vector2(1, 0.68f); 
+            drt.offsetMin = new Vector2(30, 0); 
+            drt.offsetMax = new Vector2(-30, 0); 
+
+            var nameInput = CreateInput(dyn.transform, "ModelName", "Model name"); 
+            nameInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 45); 
+            var pathInput = CreateInput(dyn.transform, "ModelPath", "Reference path"); 
+            pathInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -25); 
+
+            _modalTitle.text = "Add Model"; 
+            _modalBody.text  = "Enter a friendly name and reference path."; 
+            SetButtonLabel(_modalPrimary, "ADD"); 
+            _modalPrimary.onClick.RemoveAllListeners(); 
+            _modalPrimary.onClick.AddListener(() => 
             { 
-                // Build dynamic inputs on the modal card 
-                var modalCard = _modalTitle.transform.parent; 
-                var old = modalCard.Find("DynamicInputs"); 
-                if (old != null) Destroy(old.gameObject); 
-                var dyn = new GameObject("DynamicInputs", typeof(RectTransform)); 
-                dyn.transform.SetParent(modalCard, false); 
-                var drt = dyn.GetComponent<RectTransform>(); 
-                drt.anchorMin = new Vector2(0, 0.30f); 
-                drt.anchorMax = new Vector2(1, 0.68f); 
-                drt.offsetMin = new Vector2(30, 0); 
-                drt.offsetMax = new Vector2(-30, 0); 
-                var nameInput = CreateInput(dyn.transform, "ModelName", "Model name"); 
-                nameInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 45); 
-                var pathInput = CreateInput(dyn.transform, "ModelPath", "Reference path"); 
-                pathInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -25); 
-                // re-open modal with the inputs present 
-                _modalTitle.text = "Add Model"; 
-                _modalBody.text = "Enter a friendly name and reference path."; 
-                SetButtonLabel(_modalPrimary, "ADD"); 
-                _modalPrimary.onClick.RemoveAllListeners(); 
-                _modalPrimary.onClick.AddListener(() => 
+                var name = (nameInput.text ?? "").Trim(); 
+                var path = (pathInput.text ?? "").Trim(); 
+                if (string.IsNullOrEmpty(name)) { Toast("Model name required"); return; } 
+
+                // Sandbox copy even for typed path
+                var sandboxPath = string.IsNullOrEmpty(path) ? "(none)" : EnsureInSandbox(path);
+
+                var id = Persist.NewId("model"); 
+                var m = new ModelEntry 
                 { 
-                    var name = (nameInput.text ?? "").Trim(); 
-                    var path = (pathInput.text ?? "").Trim(); 
-                    if (string.IsNullOrEmpty(name)) 
-                    { 
-                        Toast("Model name required"); 
-                        return; 
-                    } 
-                    var id = Persist.NewId("model"); 
-                    var m = new ModelEntry 
-                    { 
-                        id = id, 
-                        displayName = name, 
-                        sourcePath = string.IsNullOrEmpty(path) ? "(none)" : path, 
-                        lastUsed = Persist.Now() 
-                    }; 
-                    Persist.UpsertModel(m); 
-                    _selectedModel = m; 
-                    _selectedTemplate = Persist.GetOrCreateTemplate(m.id); 
-                    HideModal(); 
-                    Toast("Model added"); 
-                    RefreshHistory(); 
-                    PushAndGo(ScreenId.ModelOptions); 
-                }); 
-                _modalSecondary.gameObject.SetActive(true); 
-                SetButtonLabel(_modalSecondary, "CANCEL"); 
-                _modalSecondary.onClick.RemoveAllListeners(); 
-                _modalSecondary.onClick.AddListener(() => HideModal()); 
-                _modalBlocker.SetActive(true); 
-                BringOverlaysToFront(); 
-            }, 
-            "CANCEL", 
-            () => { } 
-        ); 
+                    id          = id, 
+                    displayName = name, 
+                    sourcePath  = sandboxPath, 
+                    lastUsed    = Persist.Now() 
+                }; 
+                Persist.UpsertModel(m); 
+                _selectedModel    = m; 
+                _selectedTemplate = Persist.GetOrCreateTemplate(m.id); 
+                HideModal(); 
+                Toast("Model added"); 
+                RefreshHistory(); 
+                PushAndGo(ScreenId.ModelOptions); 
+            }); 
+            _modalSecondary.gameObject.SetActive(true); 
+            SetButtonLabel(_modalSecondary, "CANCEL"); 
+            _modalSecondary.onClick.RemoveAllListeners(); 
+            _modalSecondary.onClick.AddListener(() => HideModal()); 
+            _modalBlocker.SetActive(true); 
+            BringOverlaysToFront(); 
+        }, "CANCEL", () => { }); 
     } 
 
     // MODEL OPTIONS 
     void BuildModelOptionsScreen() 
     { 
         _modelOptionsPanel = CreateScreen("ModelOptionsScreen"); 
-        CreateTopBar( 
-            _modelOptionsPanel.transform, 
-            "MODEL", 
-            showBack: true, 
-            backAction: () => GoBack(), 
-            rightLabel: null, 
-            rightAction: null 
-        ); 
+        CreateTopBar(_modelOptionsPanel.transform, "MODEL", true, () => GoBack(), null, null); 
         var card = CreateCard(_modelOptionsPanel.transform, "ModelCard", new Vector2(1020, 560)); 
         card.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -25); 
         _modelHeader = CreateText(card.transform, "Name", "—", 34, TextAnchor.UpperLeft, C_TEXT); 
@@ -793,12 +841,15 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _modelSub.rectTransform.anchorMax = new Vector2(1, 0.74f); 
         _modelSub.rectTransform.offsetMin = new Vector2(26, 0); 
         _modelSub.rectTransform.offsetMax = new Vector2(-26, 0); 
+
         var btnChecklist = CreateButton(card.transform, "ChecklistBtn", "EDIT CHECKLIST", C_PRIMARY, true); 
         btnChecklist.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 60); 
         btnChecklist.onClick.AddListener(() => PushAndGo(ScreenId.Checklist)); 
+
         var btnAlign = CreateButton(card.transform, "AlignBtn", "ALIGN (START)", Hex("#2A3338"), true); 
         btnAlign.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -20); 
         btnAlign.onClick.AddListener(() => PushAndGo(ScreenId.Align)); 
+
         var btnInspect = CreateButton(card.transform, "InspectBtn", "START INSPECTION", C_SUCCESS, true); 
         btnInspect.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -100); 
         btnInspect.onClick.AddListener(() => 
@@ -812,6 +863,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             } 
             PushAndGo(ScreenId.Align); 
         }); 
+
         var btnHome = CreateButton(card.transform, "HomeBtn", "BACK TO HOME", Hex("#3B4449"), true); 
         btnHome.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -180); 
         btnHome.onClick.AddListener(() => NavigateTo(ScreenId.Home, clearStack: true)); 
@@ -829,17 +881,12 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     void BuildChecklistScreen() 
     { 
         _checklistPanel = CreateScreen("ChecklistScreen"); 
-        CreateTopBar( 
-            _checklistPanel.transform, 
-            "CHECKLIST", 
-            showBack: true, 
-            backAction: () => GoBack(), 
-            rightLabel: "SAVE", 
-            rightAction: () => 
-            { 
-                Persist.UpsertTemplate(_selectedTemplate); 
-                Toast("Checklist saved"); 
-            }); 
+        CreateTopBar(_checklistPanel.transform, "CHECKLIST", true, () => GoBack(), "SAVE", () => 
+        { 
+            Persist.UpsertTemplate(_selectedTemplate); 
+            Toast("Checklist saved"); 
+        }); 
+
         var topCard = CreatePanel(_checklistPanel.transform, "TopCard", C_CARD, true); 
         AddBorder(topCard, C_BORDER); 
         var tRT = topCard.GetComponent<RectTransform>(); 
@@ -847,11 +894,13 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         tRT.anchorMax = new Vector2(1, 0.94f); 
         tRT.offsetMin = new Vector2(20, 0); 
         tRT.offsetMax = new Vector2(-20, 0); 
+
         var lbl = CreateText(topCard.transform, "Lbl", "TEMPLATE", 18, TextAnchor.MiddleLeft, C_MUTED); 
         lbl.rectTransform.anchorMin = new Vector2(0, 0); 
         lbl.rectTransform.anchorMax = new Vector2(0.22f, 1); 
         lbl.rectTransform.offsetMin = new Vector2(20, 0); 
         lbl.rectTransform.offsetMax = new Vector2(-10, 0); 
+
         _templateNameInput = CreateInput(topCard.transform, "TemplateName", "Default Checklist"); 
         var inRT = _templateNameInput.GetComponent<RectTransform>(); 
         inRT.anchorMin = new Vector2(0.22f, 0.18f); 
@@ -859,6 +908,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         inRT.offsetMin = new Vector2(0, 0); 
         inRT.offsetMax = new Vector2(-20, 0); 
         inRT.sizeDelta = Vector2.zero; 
+
         var listCard = CreatePanel(_checklistPanel.transform, "PointsCard", C_CARD, true); 
         AddBorder(listCard, C_BORDER); 
         var lRT = listCard.GetComponent<RectTransform>(); 
@@ -866,15 +916,15 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         lRT.anchorMax = new Vector2(1, 0.82f); 
         lRT.offsetMin = new Vector2(20, 0); 
         lRT.offsetMax = new Vector2(-20, -10); 
+
         _pointsCountText = CreateText(listCard.transform, "Count", "0 point(s)", 18, TextAnchor.UpperLeft, C_SUB); 
         _pointsCountText.rectTransform.anchorMin = new Vector2(0, 0.92f); 
         _pointsCountText.rectTransform.anchorMax = new Vector2(1, 1); 
         _pointsCountText.rectTransform.offsetMin = new Vector2(20, 0); 
         _pointsCountText.rectTransform.offsetMax = new Vector2(-20, -10); 
-        CreateScrollView(listCard.transform, out _pointsContent, 
-            anchorMin: new Vector2(0, 0), 
-            anchorMax: new Vector2(1, 0.92f), 
-            padding: new Vector4(16, 16, 16, 16)); 
+
+        CreateScrollView(listCard.transform, out _pointsContent, new Vector2(0, 0), new Vector2(1, 0.92f), new Vector4(16, 16, 16, 16)); 
+
         var bottom = CreatePanel(_checklistPanel.transform, "Bottom", new Color(0, 0, 0, 0), false); 
         var bRT = bottom.GetComponent<RectTransform>(); 
         bRT.anchorMin = new Vector2(0, 0.02f); 
@@ -901,7 +951,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         if (_selectedModel == null) return; 
         _selectedTemplate = Persist.GetOrCreateTemplate(_selectedModel.id); 
         _templateNameInput.text = _selectedTemplate.templateName; 
-        _pointsCountText.text = $"{_selectedTemplate.points.Count} point(s)"; 
+        _pointsCountText.text   = $"{_selectedTemplate.points.Count} point(s)"; 
         ClearChildren(_pointsContent); 
         for (int i = 0; i < _selectedTemplate.points.Count; i++) 
         { 
@@ -920,14 +970,16 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             sub.rectTransform.anchorMax = new Vector2(1, 0.56f); 
             sub.rectTransform.offsetMin = new Vector2(16, 10); 
             sub.rectTransform.offsetMax = new Vector2(-240, 10); 
+
             var btnEdit = CreateMiniButton(row.transform, "Edit", "EDIT", Hex("#2A3338")); 
-            var btnUp = CreateMiniButton(row.transform, "Up", "↑", Hex("#2A3338")); 
+            var btnUp   = CreateMiniButton(row.transform, "Up", "↑",   Hex("#2A3338")); 
             var btnDown = CreateMiniButton(row.transform, "Down", "↓", Hex("#2A3338")); 
-            var btnDel = CreateMiniButton(row.transform, "Del", "X", C_DANGER); 
+            var btnDel  = CreateMiniButton(row.transform, "Del", "X",  C_DANGER); 
             PlaceMiniButton(btnEdit.GetComponent<RectTransform>(), 1, 16); 
-            PlaceMiniButton(btnUp.GetComponent<RectTransform>(), 2, 16); 
+            PlaceMiniButton(btnUp  .GetComponent<RectTransform>(), 2, 16); 
             PlaceMiniButton(btnDown.GetComponent<RectTransform>(), 3, 16); 
-            PlaceMiniButton(btnDel.GetComponent<RectTransform>(), 4, 16); 
+            PlaceMiniButton(btnDel .GetComponent<RectTransform>(), 4, 16); 
+
             btnEdit.onClick.AddListener(() => ShowEditPointModal(idx)); 
             btnUp.onClick.AddListener(() => 
             { 
@@ -945,19 +997,16 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             }); 
             btnDel.onClick.AddListener(() => 
             { 
-                ShowModal("Delete point?", 
-                    $"Delete “{p.name}” from checklist?", 
-                    "DELETE", 
-                    () => 
-                    { 
-                        _selectedTemplate.points.RemoveAt(idx); 
-                        Persist.UpsertTemplate(_selectedTemplate); 
-                        RefreshChecklistUI(); 
-                        Toast("Point deleted"); 
-                    }, 
-                    "CANCEL", null); 
+                ShowModal("Delete point?", $"Delete “{p.name}” from checklist?", "DELETE", () => 
+                { 
+                    _selectedTemplate.points.RemoveAt(idx); 
+                    Persist.UpsertTemplate(_selectedTemplate); 
+                    RefreshChecklistUI(); 
+                    Toast("Point deleted"); 
+                }, "CANCEL", null); 
             }); 
         } 
+
         _templateNameInput.onEndEdit.RemoveAllListeners(); 
         _templateNameInput.onEndEdit.AddListener(val => 
         { 
@@ -979,14 +1028,13 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     }); 
     void ShowEditPointModal(int idx) 
     { 
-        if (idx < 0 ||
-            idx >= _selectedTemplate.points.Count) return; 
+        if (idx < 0 || idx >= _selectedTemplate.points.Count) return; 
         var existing = _selectedTemplate.points[idx]; 
         ShowPointEditorModal("Edit Inspection Point", existing, (name, instr, tol) => 
         { 
-            existing.name = name; 
+            existing.name       = name; 
             existing.instruction = instr; 
-            existing.tolerance = tol; 
+            existing.tolerance   = tol; 
             Persist.UpsertTemplate(_selectedTemplate); 
             RefreshChecklistUI(); 
             Toast("Point updated"); 
@@ -997,10 +1045,12 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _modalBlocker.SetActive(true); 
         BringOverlaysToFront(); 
         _modalTitle.text = title; 
-        _modalBody.text = "Define what to inspect. Keep it short and clear."; 
+        _modalBody.text  = "Define what to inspect. Keep it short and clear."; 
+
         var card = _modalTitle.transform.parent; 
-        var old = card.Find("DynamicInputs"); 
+        var old  = card.Find("DynamicInputs"); 
         if (old != null) Destroy(old.gameObject); 
+
         var dyn = new GameObject("DynamicInputs", typeof(RectTransform)); 
         dyn.transform.SetParent(card, false); 
         var drt = dyn.GetComponent<RectTransform>(); 
@@ -1008,28 +1058,31 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         drt.anchorMax = new Vector2(1, 0.70f); 
         drt.offsetMin = new Vector2(30, 0); 
         drt.offsetMax = new Vector2(-30, 0); 
+
         var nameInput = CreateInput(dyn.transform, "Name", "Point name"); 
         nameInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 80); 
         var instrInput = CreateInput(dyn.transform, "Instr", "Instruction"); 
         instrInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, 15); 
         var tolInput = CreateInput(dyn.transform, "Tol", "Tolerance"); 
         tolInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -50); 
+
         if (existing != null) 
         { 
             nameInput.text = existing.name; 
             instrInput.text = existing.instruction; 
-            tolInput.text = existing.tolerance; 
+            tolInput.text   = existing.tolerance; 
         } 
+
         SetButtonLabel(_modalPrimary, "SAVE"); 
         _modalPrimary.onClick.RemoveAllListeners(); 
         _modalPrimary.onClick.AddListener(() => 
         { 
-            var n = (nameInput.text ?? "").Trim(); 
+            var n   = (nameInput.text ?? "").Trim(); 
             var ins = (instrInput.text ?? "").Trim(); 
-            var t = (tolInput.text ?? "").Trim(); 
+            var t   = (tolInput.text   ?? "").Trim(); 
             if (string.IsNullOrEmpty(n)) { Toast("Point name required"); return; } 
             if (string.IsNullOrEmpty(ins)) ins = "Inspect as per standard."; 
-            if (string.IsNullOrEmpty(t)) t = "N/A"; 
+            if (string.IsNullOrEmpty(t))   t   = "N/A"; 
             HideModal(); 
             onSave?.Invoke(n, ins, t); 
         }); 
@@ -1039,7 +1092,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _modalSecondary.onClick.AddListener(() => HideModal()); 
     } 
 
-    // ALIGN (placeholder → now loads AR model) 
+    // ALIGN 
     void BuildAlignScreen() 
     { 
         _alignPanel = CreateScreen("AlignScreen"); 
@@ -1051,13 +1104,15 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _alignModelName.rectTransform.anchorMax = new Vector2(1, 1); 
         _alignModelName.rectTransform.offsetMin = new Vector2(24, 0); 
         _alignModelName.rectTransform.offsetMax = new Vector2(-24, -16); 
+
         var help = CreateText(card.transform, "Help", 
-            "ALIGNMENT (placeholder):\n\n• Later: AR camera + transparent CAD overlay.\n• User manually aligns model to physical part.\n\nFor now: confirm alignment to proceed.", 
+            "ALIGNMENT:\n\n• AR camera + transparent CAD overlay.\n• Tap to place on detected planes.\n• Rotate/scale via UI.\n\nConfirm alignment to proceed.", 
             20, TextAnchor.UpperLeft, C_SUB); 
         help.rectTransform.anchorMin = new Vector2(0, 0.34f); 
         help.rectTransform.anchorMax = new Vector2(1, 0.84f); 
         help.rectTransform.offsetMin = new Vector2(24, 0); 
         help.rectTransform.offsetMax = new Vector2(-24, 0); 
+
         var toggleRow = CreatePanel(card.transform, "ToggleRow", Hex("#12171A"), true); 
         AddBorder(toggleRow, C_BORDER); 
         var trt = toggleRow.GetComponent<RectTransform>(); 
@@ -1065,6 +1120,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         trt.anchorMax = new Vector2(1, 0.32f); 
         trt.offsetMin = new Vector2(24, 0); 
         trt.offsetMax = new Vector2(-24, 0); 
+
         var toggleGO = new GameObject("AlignToggle", typeof(RectTransform), typeof(Toggle)); 
         toggleGO.transform.SetParent(toggleRow.transform, false); 
         Stretch(toggleGO.GetComponent<RectTransform>(), 0, 0, 0, 0); 
@@ -1082,21 +1138,22 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         mark.GetComponent<Image>().color = C_ACCENT; 
         _alignConfirmedToggle = toggleGO.GetComponent<Toggle>(); 
         _alignConfirmedToggle.targetGraphic = box.GetComponent<Image>(); 
-        _alignConfirmedToggle.graphic = mark.GetComponent<Image>(); 
+        _alignConfirmedToggle.graphic       = mark.GetComponent<Image>(); 
         _alignConfirmedToggle.isOn = false; 
+
         var tlabel = CreateText(toggleGO.transform, "Label", "ALIGNED TO PHYSICAL PART", 22, TextAnchor.MiddleLeft, C_TEXT); 
         tlabel.rectTransform.anchorMin = new Vector2(0, 0); 
         tlabel.rectTransform.anchorMax = new Vector2(1, 1); 
         tlabel.rectTransform.offsetMin = new Vector2(80, 0); 
         tlabel.rectTransform.offsetMax = new Vector2(-20, 0); 
+
         var startBtn = CreateButton(card.transform, "StartInspection", "START INSPECTION", C_SUCCESS, true); 
         startBtn.GetComponent<RectTransform>().anchorMin = new Vector2(0.52f, 0.03f); 
         startBtn.GetComponent<RectTransform>().anchorMax = new Vector2(1, 0.15f); 
         Stretch(startBtn.GetComponent<RectTransform>(), 0, 0, 0, 0); 
         startBtn.onClick.AddListener(() => 
         { 
-            if (_selectedTemplate == null ||
-                _selectedTemplate.points.Count == 0) 
+            if (_selectedTemplate == null || _selectedTemplate.points.Count == 0) 
             { 
                 Toast("Checklist empty"); 
                 PushAndGo(ScreenId.Checklist); 
@@ -1110,6 +1167,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             BeginRun(); 
             PushAndGo(ScreenId.Inspection); 
         }); 
+
         var backBtn = CreateButton(card.transform, "BackToChecklist", "BACK TO CHECKLIST", Hex("#2A3338"), true); 
         backBtn.GetComponent<RectTransform>().anchorMin = new Vector2(0, 0.03f); 
         backBtn.GetComponent<RectTransform>().anchorMax = new Vector2(0.48f, 0.15f); 
@@ -1122,10 +1180,9 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _alignConfirmedToggle.isOn = false; 
     } 
 
-    // ========================= NEW: Enable AR + load GLTF on Align =========================
+    // ===== NEW: Enable AR + load GLTF/GLB in Align =====
     async void EnableARAlign()
     {
-        // Guards
         if (_selectedModel == null)
         {
             Toast("No model selected");
@@ -1143,6 +1200,15 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         }
 
         var p = _selectedModel.sourcePath?.Trim() ?? "";
+        if (string.IsNullOrEmpty(p) || !File.Exists(p))
+        {
+            ShowModal("File missing",
+                      $"Cannot find:\n{p}\n\nTip: Re-add the model via +ADD so the app copies it into the sandbox.",
+                      "OK", null);
+            Debug.LogError($"[Align] Missing file: {p}");
+            return;
+        }
+
         var ext = Path.GetExtension(p).ToLowerInvariant();
         if (ext != ".glb" && ext != ".gltf")
         {
@@ -1152,7 +1218,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             return;
         }
 
-        // Load model under AR parent (usually XROrigin.transform)
+        Debug.Log($"[Align] Loading model: {p}");
         var go = await _loader.LoadGltf(p, _arLoader.modelParent);
         if (go == null)
         {
@@ -1160,25 +1226,24 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             return;
         }
 
-        // Make semi-transparent for CAD overlay and hand off to ARModelLoader
+        // Make semi-transparent & hand off to AR placement
         MakeTransparent(go, _transparentMat, 0.4f);
         _arLoader.currentModel = go;
 
-        // Optional: initial center
         go.transform.localPosition = Vector3.zero;
         go.transform.localRotation = Quaternion.identity;
         go.transform.localScale    = Vector3.one;
 
         Toast("Model loaded — tap to place, use rotate/scale");
     }
-    // ==============================================================================
+    // ================================================
 
     // INSPECTION 
     void BuildInspectionScreen() 
     { 
         _inspectionPanel = CreateScreen("InspectionScreen"); 
         CreateTopBar(_inspectionPanel.transform, "INSPECTION", true, () => GoBack(), "REPORT", () => PushAndGo(ScreenId.Report)); 
-        // Layout: left drawer (steps) + right main panel 
+
         var left = CreatePanel(_inspectionPanel.transform, "LeftDrawer", Hex("#101416"), true); 
         AddBorder(left, C_BORDER); 
         var lrt = left.GetComponent<RectTransform>(); 
@@ -1186,10 +1251,8 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         lrt.anchorMax = new Vector2(0.28f, 0.92f); 
         lrt.offsetMin = new Vector2(20, 0); 
         lrt.offsetMax = new Vector2(-10, 0); 
-        CreateScrollView(left.transform, out _stepDrawerContent, 
-            anchorMin: new Vector2(0, 0), 
-            anchorMax: new Vector2(1, 1), 
-            padding: new Vector4(10, 10, 10, 10)); 
+        CreateScrollView(left.transform, out _stepDrawerContent, new Vector2(0, 0), new Vector2(1, 1), new Vector4(10, 10, 10, 10)); 
+
         var right = CreatePanel(_inspectionPanel.transform, "RightMain", C_CARD, true); 
         AddBorder(right, C_BORDER); 
         var rrt = right.GetComponent<RectTransform>(); 
@@ -1197,81 +1260,80 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         rrt.anchorMax = new Vector2(1, 0.92f); 
         rrt.offsetMin = new Vector2(10, 0); 
         rrt.offsetMax = new Vector2(-20, 0); 
-        _inspectTitle = CreateText(right.transform, "Title", "—", 26, TextAnchor.UpperLeft, C_TEXT); 
-        _inspectTitle.rectTransform.anchorMin = new Vector2(0, 0.86f); 
-        _inspectTitle.rectTransform.anchorMax = new Vector2(1, 1); 
-        _inspectTitle.rectTransform.offsetMin = new Vector2(18, 0); 
-        _inspectTitle.rectTransform.offsetMax = new Vector2(-18, -10); 
-        _inspectProgress = CreateText(right.transform, "Progress", "—", 18, TextAnchor.UpperLeft, C_SUB); 
-        _inspectProgress.rectTransform.anchorMin = new Vector2(0, 0.80f); 
-        _inspectProgress.rectTransform.anchorMax = new Vector2(1, 0.86f); 
-        _inspectProgress.rectTransform.offsetMin = new Vector2(18, 0); 
-        _inspectProgress.rectTransform.offsetMax = new Vector2(-18, 0); 
-        _inspectPointName = CreateText(right.transform, "PointName", "—", 22, TextAnchor.UpperLeft, C_TEXT); 
-        _inspectPointName.rectTransform.anchorMin = new Vector2(0, 0.70f); 
-        _inspectPointName.rectTransform.anchorMax = new Vector2(1, 0.80f); 
-        _inspectPointName.rectTransform.offsetMin = new Vector2(18, 0); 
-        _inspectPointName.rectTransform.offsetMax = new Vector2(-18, 0); 
+
+        _inspectTitle       = CreateText(right.transform, "Title",       "—", 26, TextAnchor.UpperLeft, C_TEXT); 
+        _inspectProgress    = CreateText(right.transform, "Progress",    "—", 18, TextAnchor.UpperLeft, C_SUB); 
+        _inspectPointName   = CreateText(right.transform, "PointName",   "—", 22, TextAnchor.UpperLeft, C_TEXT); 
         _inspectInstruction = CreateText(right.transform, "Instruction", "—", 18, TextAnchor.UpperLeft, C_SUB); 
-        _inspectInstruction.rectTransform.anchorMin = new Vector2(0, 0.58f); 
-        _inspectInstruction.rectTransform.anchorMax = new Vector2(1, 0.70f); 
-        _inspectInstruction.rectTransform.offsetMin = new Vector2(18, 0); 
-        _inspectInstruction.rectTransform.offsetMax = new Vector2(-18, 0); 
+
+        _inspectTitle.rectTransform.anchorMin       = new Vector2(0, 0.86f);
+        _inspectTitle.rectTransform.anchorMax       = new Vector2(1, 1);
+        _inspectTitle.rectTransform.offsetMin       = new Vector2(18, 0);
+        _inspectTitle.rectTransform.offsetMax       = new Vector2(-18, -10);
+
+        _inspectProgress.rectTransform.anchorMin    = new Vector2(0, 0.80f);
+        _inspectProgress.rectTransform.anchorMax    = new Vector2(1, 0.86f);
+        _inspectProgress.rectTransform.offsetMin    = new Vector2(18, 0);
+        _inspectProgress.rectTransform.offsetMax    = new Vector2(-18, 0);
+
+        _inspectPointName.rectTransform.anchorMin   = new Vector2(0, 0.70f);
+        _inspectPointName.rectTransform.anchorMax   = new Vector2(1, 0.80f);
+        _inspectPointName.rectTransform.offsetMin   = new Vector2(18, 0);
+        _inspectPointName.rectTransform.offsetMax   = new Vector2(-18, 0);
+
+        _inspectInstruction.rectTransform.anchorMin = new Vector2(0, 0.58f);
+        _inspectInstruction.rectTransform.anchorMax = new Vector2(1, 0.70f);
+        _inspectInstruction.rectTransform.offsetMin = new Vector2(18, 0);
+        _inspectInstruction.rectTransform.offsetMax = new Vector2(-18, 0);
+
         _inspectNotes = CreateInput(right.transform, "Notes", "Notes (optional)"); 
         var nrt = _inspectNotes.GetComponent<RectTransform>(); 
-        nrt.anchorMin = new Vector2(0, 0.42f); 
-        nrt.anchorMax = new Vector2(1, 0.56f); 
-        nrt.offsetMin = new Vector2(18, 0); 
-        nrt.offsetMax = new Vector2(-18, 0); 
-        // Buttons row 
-        _inspectPassBtn = CreateButton(right.transform, "Pass", "PASS", C_SUCCESS, true); 
+        nrt.anchorMin  = new Vector2(0, 0.42f); 
+        nrt.anchorMax  = new Vector2(1, 0.56f); 
+        nrt.offsetMin  = new Vector2(18, 0); 
+        nrt.offsetMax  = new Vector2(-18, 0); 
+
+        _inspectPassBtn   = CreateButton(right.transform, "Pass",  "PASS",  C_SUCCESS, true); 
+        _inspectFailBtn   = CreateButton(right.transform, "Fail",  "FAIL",  C_DANGER,  true); 
+        _inspectClearBtn  = CreateButton(right.transform, "Clear", "CLEAR", Hex("#2A3338"), true); 
+
         var prt = _inspectPassBtn.GetComponent<RectTransform>(); 
-        prt.anchorMin = new Vector2(0, 0.32f); 
-        prt.anchorMax = new Vector2(0.32f, 0.40f); 
-        Stretch(prt, 10, 6, 6, 6); 
-        _inspectFailBtn = CreateButton(right.transform, "Fail", "FAIL", C_DANGER, true); 
         var frt = _inspectFailBtn.GetComponent<RectTransform>(); 
-        frt.anchorMin = new Vector2(0.34f, 0.32f); 
-        frt.anchorMax = new Vector2(0.66f, 0.40f); 
-        Stretch(frt, 6, 6, 6, 6); 
-        _inspectClearBtn = CreateButton(right.transform, "Clear", "CLEAR", Hex("#2A3338"), true); 
         var crt = _inspectClearBtn.GetComponent<RectTransform>(); 
-        crt.anchorMin = new Vector2(0.68f, 0.32f); 
-        crt.anchorMax = new Vector2(1.0f, 0.40f); 
-        Stretch(crt, 6, 10, 6, 6); 
-        // Navigation & photo 
-        _inspectPrevBtn = CreateButton(right.transform, "Prev", "← PREV", Hex("#2A3338"), true); 
+
+        prt.anchorMin = new Vector2(0,    0.32f); prt.anchorMax = new Vector2(0.32f, 0.40f); Stretch(prt, 10, 6, 6, 6); 
+        frt.anchorMin = new Vector2(0.34f,0.32f); frt.anchorMax = new Vector2(0.66f, 0.40f); Stretch(frt, 6,  6, 6, 6); 
+        crt.anchorMin = new Vector2(0.68f,0.32f); crt.anchorMax = new Vector2(1.0f, 0.40f); Stretch(crt, 6, 10, 6, 6); 
+
+        _inspectPrevBtn   = CreateButton(right.transform, "Prev", "← PREV", Hex("#2A3338"), true); 
+        _inspectNextBtn   = CreateButton(right.transform, "Next", "NEXT →", C_PRIMARY,     true); 
+        _inspectPhotoBtn  = CreateButton(right.transform, "Photo","TAKE PHOTO", C_ACCENT,  true); 
+        _inspectPhotoCount= CreateText  (right.transform, "PhotoCount", "Photos: 0", 16, TextAnchor.UpperLeft, C_SUB); 
+        _inspectPhotoPreview = new GameObject("Preview", typeof(RectTransform), typeof(RawImage)).GetComponent<RawImage>(); 
+        _inspectPhotoPreview.transform.SetParent(right.transform, false); 
+        _inspectFinishBtn = CreateButton(right.transform, "Finish", "FINISH RUN", C_WARN, true); 
+
         var prevrt = _inspectPrevBtn.GetComponent<RectTransform>(); 
-        prevrt.anchorMin = new Vector2(0, 0.20f); 
-        prevrt.anchorMax = new Vector2(0.32f, 0.28f); 
-        Stretch(prevrt, 10, 6, 6, 6); 
-        _inspectNextBtn = CreateButton(right.transform, "Next", "NEXT →", C_PRIMARY, true); 
         var nextrt = _inspectNextBtn.GetComponent<RectTransform>(); 
-        nextrt.anchorMin = new Vector2(0.34f, 0.20f); 
-        nextrt.anchorMax = new Vector2(0.66f, 0.28f); 
-        Stretch(nextrt, 6, 6, 6, 6); 
-        _inspectPhotoBtn = CreateButton(right.transform, "Photo", "TAKE PHOTO", C_ACCENT, true); 
         var photort = _inspectPhotoBtn.GetComponent<RectTransform>(); 
-        photort.anchorMin = new Vector2(0.68f, 0.20f); 
-        photort.anchorMax = new Vector2(1.0f, 0.28f); 
-        Stretch(photort, 6, 10, 6, 6); 
-        _inspectPhotoCount = CreateText(right.transform, "PhotoCount", "Photos: 0", 16, TextAnchor.UpperLeft, C_SUB); 
+        var pvr = _inspectPhotoPreview.GetComponent<RectTransform>(); 
+        var finrt = _inspectFinishBtn.GetComponent<RectTransform>(); 
+
+        prevrt.anchorMin = new Vector2(0,      0.20f); prevrt.anchorMax = new Vector2(0.32f, 0.28f); Stretch(prevrt, 10, 6, 6, 6); 
+        nextrt.anchorMin = new Vector2(0.34f,  0.20f); nextrt.anchorMax = new Vector2(0.66f, 0.28f); Stretch(nextrt, 6,  6, 6, 6); 
+        photort.anchorMin= new Vector2(0.68f,  0.20f); photort.anchorMax= new Vector2(1.0f, 0.28f); Stretch(photort, 6, 10, 6, 6); 
         _inspectPhotoCount.rectTransform.anchorMin = new Vector2(0, 0.14f); 
         _inspectPhotoCount.rectTransform.anchorMax = new Vector2(0.5f, 0.20f); 
         _inspectPhotoCount.rectTransform.offsetMin = new Vector2(18, 0); 
         _inspectPhotoCount.rectTransform.offsetMax = new Vector2(-18, 0); 
-        _inspectPhotoPreview = new GameObject("Preview", typeof(RectTransform), typeof(RawImage)).GetComponent<RawImage>(); 
-        _inspectPhotoPreview.transform.SetParent(right.transform, false); 
-        var pvr = _inspectPhotoPreview.GetComponent<RectTransform>(); 
         pvr.anchorMin = new Vector2(0.0f, 0.02f); 
         pvr.anchorMax = new Vector2(0.48f, 0.14f); 
         Stretch(pvr, 18, 6, 6, 6); 
         _inspectPhotoPreview.color = Color.white; 
-        _inspectFinishBtn = CreateButton(right.transform, "Finish", "FINISH RUN", C_WARN, true); 
-        var finrt = _inspectFinishBtn.GetComponent<RectTransform>(); 
         finrt.anchorMin = new Vector2(0.52f, 0.02f); 
         finrt.anchorMax = new Vector2(1.0f, 0.14f); 
         Stretch(finrt, 6, 18, 6, 6); 
+
         // Wire logic 
         _inspectPassBtn.onClick.AddListener(() => 
         { 
@@ -1291,8 +1353,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             if (step != null) 
             { 
                 step.status = StepStatus.NotDone; 
-                // keep photos; clear only notes 
-                step.notes = ""; 
+                step.notes  = ""; 
                 _inspectNotes.text = ""; 
             } 
             Toast("Cleared"); 
@@ -1316,10 +1377,8 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             RefreshInspectionUI(); 
             Toast("Photo saved"); 
         }); 
-        _inspectFinishBtn.onClick.AddListener(() => 
-        { 
-            FinishRun(); 
-        }); 
+        _inspectFinishBtn.onClick.AddListener(() => { FinishRun(); }); 
+
         _inspectNotes.onEndEdit.AddListener(val => 
         { 
             var step = GetCurrentStep(); 
@@ -1328,38 +1387,36 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     } 
     void RefreshInspectionUI() 
     { 
-        if (_activeRun == null ||
-            _selectedTemplate == null) return; 
-        // Drawer list of steps 
+        if (_activeRun == null || _selectedTemplate == null) return; 
         ClearChildren(_stepDrawerContent); 
         for (int i = 0; i < _selectedTemplate.points.Count; i++) 
         { 
             int idx = i; 
             var p = _selectedTemplate.points[i]; 
             var step = _activeRun.results[idx]; 
-            var item = CreateListCard(_stepDrawerContent, 
-                $"{idx + 1}. {p.name}", 
-                $"Status: {step.status}", 
-                () => 
-                { 
-                    _activeStepIndex = idx; 
-                    RefreshInspectionUI(); 
-                }); 
+            var item = CreateListCard(_stepDrawerContent, $"{idx + 1}. {p.name}", $"Status: {step.status}", () => 
+            { 
+                _activeStepIndex = idx; 
+                RefreshInspectionUI(); 
+            }); 
             var img = item.GetComponent<Image>(); 
             img.color = (idx == _activeStepIndex) ? Hex("#162026") : Hex("#12171A"); 
         } 
+
         var total = _selectedTemplate.points.Count; 
         var currentPoint = _selectedTemplate.points[_activeStepIndex]; 
-        var currentStep = _activeRun.results[_activeStepIndex]; 
-        _inspectTitle.text = $"{_selectedModel.displayName} — {_selectedTemplate.templateName}"; 
+        var currentStep  = _activeRun.results[_activeStepIndex]; 
+
+        _inspectTitle.text       = $"{_selectedModel.displayName} — {_selectedTemplate.templateName}"; 
         var doneCount = _activeRun.results.FindAll(r => r.status != StepStatus.NotDone).Count; 
-        _inspectProgress.text = $"Step {_activeStepIndex + 1}/{total} — Done {doneCount}/{total}"; 
-        _inspectPointName.text = currentPoint.name; 
+        _inspectProgress.text    = $"Step {_activeStepIndex + 1}/{total} — Done {doneCount}/{total}"; 
+        _inspectPointName.text   = currentPoint.name; 
         _inspectInstruction.text = $"{currentPoint.instruction}\nTOL: {currentPoint.tolerance}"; 
-        _inspectNotes.text = currentStep.notes ?? ""; 
+        _inspectNotes.text       = currentStep.notes ?? ""; 
         _inspectPrevBtn.interactable = _activeStepIndex > 0; 
         _inspectNextBtn.interactable = _activeStepIndex < total - 1; 
-        _inspectPhotoCount.text = $"Photos: {currentStep.photos.Count}"; 
+        _inspectPhotoCount.text  = $"Photos: {currentStep.photos.Count}"; 
+
         if (currentStep.photos.Count > 0) 
         { 
             var last = currentStep.photos[currentStep.photos.Count - 1]; 
@@ -1369,19 +1426,19 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         { 
             _inspectPhotoPreview.texture = null; 
         } 
-        // Finish button enabled if at least one step is done; allow finishing any time 
+
         _inspectFinishBtn.interactable = true; 
     } 
     void BeginRun() 
     { 
         _activeRun = new InspectionRun 
         { 
-            runId = Persist.NewId("run"), 
-            modelId = _selectedModel.id, 
-            modelName = _selectedModel.displayName, 
-            operatorName = PlayerPrefs.GetString("user_name", "Operator"), 
-            startedAt = Persist.Now(), 
-            finishedAt = "" 
+            runId       = Persist.NewId("run"), 
+            modelId     = _selectedModel.id, 
+            modelName   = _selectedModel.displayName, 
+            operatorName= PlayerPrefs.GetString("user_name", "Operator"), 
+            startedAt   = Persist.Now(), 
+            finishedAt  = "" 
         }; 
         _activeRun.results = new List<StepResult>(); 
         foreach (var p in _selectedTemplate.points) 
@@ -1389,9 +1446,9 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             _activeRun.results.Add(new StepResult 
             { 
                 pointId = p.id, 
-                status = StepStatus.NotDone, 
-                notes = "", 
-                photos = new List<EvidencePhoto>() 
+                status  = StepStatus.NotDone, 
+                notes   = "", 
+                photos  = new List<EvidencePhoto>() 
             }); 
         } 
         _activeStepIndex = 0; 
@@ -1408,8 +1465,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     StepResult GetCurrentStep() 
     { 
         if (_activeRun == null) return null; 
-        if (_activeStepIndex < 0 ||
-            _activeStepIndex >= _activeRun.results.Count) return null; 
+        if (_activeStepIndex < 0 || _activeStepIndex >= _activeRun.results.Count) return null; 
         return _activeRun.results[_activeStepIndex]; 
     } 
     void SetCurrentStepStatus(StepStatus status) 
@@ -1421,22 +1477,18 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     { 
         var step = GetCurrentStep(); 
         if (step == null) return; 
-        // Create a simple placeholder texture (solid JD yellow with a timestamp line) 
+
         int w = 480, h = 270; 
         var tex = new Texture2D(w, h, TextureFormat.RGBA32, false); 
         var pixels = new Color[w * h]; 
-        for (int i = 0; i < pixels.Length; i++) pixels[i] = C_ACCENT; // JD yellow 
+        for (int i = 0; i < pixels.Length; i++) pixels[i] = C_ACCENT; 
         tex.SetPixels(pixels); 
         tex.Apply(); 
         var png = tex.EncodeToPNG(); 
         var path = Persist.EvidencePathFor(_activeRun.runId, _activeStepIndex); 
         File.WriteAllBytes(path, png); 
-        step.photos.Add(new EvidencePhoto 
-        { 
-            filePath = path, 
-            takenAt = Persist.Now() 
-        }); 
-        // Also update preview in memory 
+        step.photos.Add(new EvidencePhoto { filePath = path, takenAt = Persist.Now() }); 
+
         _previewTex = tex; 
         _inspectPhotoPreview.texture = _previewTex; 
     } 
@@ -1474,23 +1526,19 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _reportHeader.rectTransform.anchorMax = new Vector2(1, 1); 
         _reportHeader.rectTransform.offsetMin = new Vector2(18, 0); 
         _reportHeader.rectTransform.offsetMax = new Vector2(-18, -10); 
-        CreateScrollView(card.transform, out _reportResultsContent, 
-            anchorMin: new Vector2(0, 0), 
-            anchorMax: new Vector2(1, 0.88f), 
-            padding: new Vector4(16, 16, 16, 16)); 
+        CreateScrollView(card.transform, out _reportResultsContent, new Vector2(0, 0), new Vector2(1, 0.88f), new Vector4(16, 16, 16, 16)); 
     } 
     void RefreshReportUI() 
     { 
         ClearChildren(_reportResultsContent); 
-        if (_activeRun == null ||
-            _selectedTemplate == null) 
+        if (_activeRun == null || _selectedTemplate == null) 
         { 
             _reportHeader.text = "No active run."; 
             return; 
         } 
         int total = _activeRun.results.Count; 
-        int pass = _activeRun.results.FindAll(r => r.status == StepStatus.Pass).Count; 
-        int fail = _activeRun.results.FindAll(r => r.status == StepStatus.Fail).Count; 
+        int pass  = _activeRun.results.FindAll(r => r.status == StepStatus.Pass).Count; 
+        int fail  = _activeRun.results.FindAll(r => r.status == StepStatus.Fail).Count; 
         _reportHeader.text = 
             $"{_activeRun.modelName} — {_selectedTemplate.templateName}\n" + 
             $"Operator: {_activeRun.operatorName}\n" + 
@@ -1509,9 +1557,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             title.rectTransform.anchorMax = new Vector2(1, 1); 
             title.rectTransform.offsetMin = new Vector2(18, 0); 
             title.rectTransform.offsetMax = new Vector2(-18, -10); 
-            var sub = CreateText(row.transform, "Sub", 
-                $"Instr: {p.instruction}\nTol: {p.tolerance}\nNotes: {r.notes}\nPhotos: {r.photos.Count}", 
-                16, TextAnchor.UpperLeft, C_SUB); 
+            var sub = CreateText(row.transform, "Sub", $"Instr: {p.instruction}\nTol: {p.tolerance}\nNotes: {r.notes}\nPhotos: {r.photos.Count}", 16, TextAnchor.UpperLeft, C_SUB); 
             sub.rectTransform.anchorMin = new Vector2(0, 0); 
             sub.rectTransform.anchorMax = new Vector2(1, 0.55f); 
             sub.rectTransform.offsetMin = new Vector2(18, 10); 
@@ -1542,7 +1588,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         var brt = border.GetComponent<RectTransform>(); 
         brt.anchorMin = new Vector2(0, 0); 
         brt.anchorMax = new Vector2(1, 0); 
-        brt.pivot = new Vector2(0.5f, 0); 
+        brt.pivot     = new Vector2(0.5f, 0); 
         brt.sizeDelta = new Vector2(0, 3); 
         brt.anchoredPosition = Vector2.zero; 
         border.GetComponent<Image>().raycastTarget = false; 
@@ -1554,7 +1600,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             var btr = back.GetComponent<RectTransform>(); 
             btr.anchorMin = new Vector2(0, 0.15f); 
             btr.anchorMax = new Vector2(0, 0.85f); 
-            btr.pivot = new Vector2(0, 0.5f); 
+            btr.pivot     = new Vector2(0, 0.5f); 
             btr.sizeDelta = new Vector2(150, 0); 
             btr.anchoredPosition = new Vector2(12, 0); 
             back.onClick.AddListener(() => backAction?.Invoke()); 
@@ -1565,7 +1611,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             var rrt = right.GetComponent<RectTransform>(); 
             rrt.anchorMin = new Vector2(1, 0.15f); 
             rrt.anchorMax = new Vector2(1, 0.85f); 
-            rrt.pivot = new Vector2(1, 0.5f); 
+            rrt.pivot     = new Vector2(1, 0.5f); 
             rrt.sizeDelta = new Vector2(220, 0); 
             rrt.anchoredPosition = new Vector2(-12, 0); 
             right.onClick.AddListener(() => rightAction?.Invoke()); 
@@ -1582,7 +1628,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         if (cardLike) 
         { 
             var sh = go.AddComponent<Shadow>(); 
-            sh.effectColor = new Color(0, 0, 0, 0.35f); 
+            sh.effectColor    = new Color(0, 0, 0, 0.35f); 
             sh.effectDistance = new Vector2(0, -2); 
         } 
         return go; 
@@ -1601,7 +1647,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         var rt = card.GetComponent<RectTransform>(); 
         rt.anchorMin = new Vector2(0.5f, 0.5f); 
         rt.anchorMax = new Vector2(0.5f, 0.5f); 
-        rt.pivot = new Vector2(0.5f, 0.5f); 
+        rt.pivot     = new Vector2(0.5f, 0.5f); 
         rt.sizeDelta = size; 
         return card; 
     } 
@@ -1610,13 +1656,13 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         var go = new GameObject(name, typeof(RectTransform), typeof(Text)); 
         go.transform.SetParent(parent, false); 
         var t = go.GetComponent<Text>(); 
-        t.font = _font; 
-        t.text = text; 
-        t.fontSize = size; 
-        t.alignment = align; 
-        t.color = color; 
+        t.font         = _font; 
+        t.text         = text; 
+        t.fontSize     = size; 
+        t.alignment    = align; 
+        t.color        = color; 
         t.horizontalOverflow = HorizontalWrapMode.Wrap; 
-        t.verticalOverflow = VerticalWrapMode.Overflow; 
+        t.verticalOverflow   = VerticalWrapMode.Overflow; 
         return t; 
     } 
     InputField CreateInput(Transform parent, string name, string placeholder) 
@@ -1626,7 +1672,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         var rt = go.GetComponent<RectTransform>(); 
         rt.anchorMin = new Vector2(0.5f, 0.5f); 
         rt.anchorMax = new Vector2(0.5f, 0.5f); 
-        rt.pivot = new Vector2(0.5f, 0.5f); 
+        rt.pivot     = new Vector2(0.5f, 0.5f); 
         rt.sizeDelta = new Vector2(780, 58); 
         go.GetComponent<Image>().color = Hex("#101516"); 
         AddBorder(go, C_BORDER); 
@@ -1635,25 +1681,25 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         var trt = textGO.GetComponent<RectTransform>(); 
         Stretch(trt, 16, 16, 10, 10); 
         var text = textGO.GetComponent<Text>(); 
-        text.font = _font; 
-        text.fontSize = 22; 
+        text.font      = _font; 
+        text.fontSize  = 22; 
         text.alignment = TextAnchor.MiddleLeft; 
-        text.color = C_TEXT; 
+        text.color     = C_TEXT; 
         var phGO = new GameObject("Placeholder", typeof(RectTransform), typeof(Text)); 
         phGO.transform.SetParent(go.transform, false); 
         var prt = phGO.GetComponent<RectTransform>(); 
         Stretch(prt, 16, 16, 10, 10); 
         var ph = phGO.GetComponent<Text>(); 
-        ph.font = _font; 
-        ph.fontSize = 22; 
+        ph.font      = _font; 
+        ph.fontSize  = 22; 
         ph.alignment = TextAnchor.MiddleLeft; 
-        ph.color = C_MUTED; 
-        ph.text = placeholder; 
+        ph.color     = C_MUTED; 
+        ph.text      = placeholder; 
         var input = go.GetComponent<InputField>(); 
         input.textComponent = text; 
-        input.placeholder = ph; 
-        input.lineType = InputField.LineType.SingleLine; 
-        input.characterLimit = 500; 
+        input.placeholder   = ph; 
+        input.lineType      = InputField.LineType.SingleLine; 
+        input.characterLimit= 500; 
         return input; 
     } 
     Button CreateButton(Transform parent, string name, string label, Color bg, bool roundedLook) 
@@ -1663,7 +1709,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         var rt = go.GetComponent<RectTransform>(); 
         rt.anchorMin = new Vector2(0.5f, 0.5f); 
         rt.anchorMax = new Vector2(0.5f, 0.5f); 
-        rt.pivot = new Vector2(0.5f, 0.5f); 
+        rt.pivot     = new Vector2(0.5f, 0.5f); 
         rt.sizeDelta = new Vector2(520, 64); 
         var img = go.GetComponent<Image>(); 
         img.color = bg; 
@@ -1702,35 +1748,40 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         rt.offsetMax = new Vector2(-padding.y, -padding.z); 
         sv.GetComponent<Image>().color = new Color(0, 0, 0, 0); 
         sv.GetComponent<Mask>().showMaskGraphic = false; 
+
         var vp = new GameObject("Viewport", typeof(RectTransform), typeof(Image), typeof(Mask)); 
         vp.transform.SetParent(sv.transform, false); 
         var vprt = vp.GetComponent<RectTransform>(); 
         Stretch(vprt); 
         vp.GetComponent<Image>().color = new Color(1, 1, 1, 0.01f); 
         vp.GetComponent<Mask>().showMaskGraphic = false; 
+
         var content = new GameObject("Content", typeof(RectTransform)); 
         content.transform.SetParent(vp.transform, false); 
         var crt = content.GetComponent<RectTransform>(); 
         crt.anchorMin = new Vector2(0, 1); 
         crt.anchorMax = new Vector2(1, 1); 
-        crt.pivot = new Vector2(0.5f, 1); 
+        crt.pivot     = new Vector2(0.5f, 1); 
         crt.anchoredPosition = Vector2.zero; 
         crt.sizeDelta = new Vector2(0, 0); 
+
         var layout = content.AddComponent<VerticalLayoutGroup>(); 
         layout.spacing = 10; 
         layout.childAlignment = TextAnchor.UpperCenter; 
         layout.childControlHeight = true; 
-        layout.childControlWidth = true; 
+        layout.childControlWidth  = true; 
         layout.childForceExpandHeight = false; 
-        layout.childForceExpandWidth = true; 
+        layout.childForceExpandWidth  = true; 
+
         var fitter = content.AddComponent<ContentSizeFitter>(); 
-        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize; 
+        fitter.verticalFit   = ContentSizeFitter.FitMode.PreferredSize; 
         fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained; 
+
         var sr = sv.GetComponent<ScrollRect>(); 
-        sr.viewport = vprt; 
-        sr.content = crt; 
-        sr.horizontal = false; 
-        sr.vertical = true; 
+        sr.viewport  = vprt; 
+        sr.content   = crt; 
+        sr.horizontal= false; 
+        sr.vertical  = true; 
         contentOut = content.transform; 
     } 
     GameObject CreateListCard(Transform parent, string title, string subtitle, Action onClick) 
@@ -1757,7 +1808,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     } 
 
     // -------------------------------------------------------------------------------- 
-    // Utility Helpers (missing in your paste) 
+    // Utility Helpers 
     // -------------------------------------------------------------------------------- 
     static void Stretch(RectTransform rt, float left = 0, float right = 0, float bottom = 0, float top = 0) 
     { 
@@ -1783,7 +1834,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     { 
         rt.anchorMin = new Vector2(1, 0.5f); 
         rt.anchorMax = new Vector2(1, 0.5f); 
-        rt.pivot = new Vector2(1, 0.5f); 
+        rt.pivot     = new Vector2(1, 0.5f); 
         float spacing = rt.sizeDelta.x + 10; 
         rt.anchoredPosition = new Vector2(-(marginRight + spacing * (orderFromRight - 1)), 0); 
     } 
@@ -1791,18 +1842,18 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     { 
         rt.anchorMin = new Vector2(1, 0); 
         rt.anchorMax = new Vector2(1, 0); 
-        rt.pivot = new Vector2(1, 0); 
+        rt.pivot     = new Vector2(1, 0); 
         rt.anchoredPosition = new Vector2(-marginX, marginY); 
     } 
     static void PlaceButtonBottomLeft(RectTransform rt, float marginX, float marginY) 
     { 
         rt.anchorMin = new Vector2(0, 0); 
         rt.anchorMax = new Vector2(0, 0); 
-        rt.pivot = new Vector2(0, 0); 
+        rt.pivot     = new Vector2(0, 0); 
         rt.anchoredPosition = new Vector2(marginX, marginY); 
     } 
 
-    // ========================= NEW: Transparent helper =========================
+    // ===== Transparent helper =====
     void MakeTransparent(GameObject go, Material mat, float alpha = 0.4f)
     {
         if (go == null || mat == null) return;
@@ -1818,6 +1869,4 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             r.sharedMaterials = mats;
         }
     }
-    // ==========================================================================
-
-} 
+}
