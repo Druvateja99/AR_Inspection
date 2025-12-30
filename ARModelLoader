@@ -13,131 +13,91 @@ public class ARModelLoader : MonoBehaviour
     [Header("AR Managers (assign from scene)")]
     public XROrigin xrOrigin;
     public ARRaycastManager raycastManager;
-    public ARPlaneManager planeManager;        // optional (for visualizing planes)
-    public ARCameraManager arCameraManager;    // optional (camera control)
+    public ARPlaneManager planeManager;        // optional
+    public ARCameraManager arCameraManager;    // optional
 
     [Header("Model Loading")]
-    public Transform modelParent;              // e.g., XROrigin.transform; where model will attach
-    public Material transparentMaterial;       // set Rendering Mode=Transparent, alpha ~0.3–0.6
-    public GameObject currentModel;            // the loaded instance (runtime)
+    public Transform modelParent;              // e.g., XROrigin.transform
+    public Material transparentMaterial;       // optional
+    public GameObject currentModel;
 
     [Header("Placement & Alignment")]
     public bool tapToPlaceEnabled = true;
     public float rotateSpeed = 40f;            // degrees/sec
     public float scaleStep = 0.02f;            // per tap
 
-    // Internal
     private static readonly List<ARRaycastHit> s_Hits = new List<ARRaycastHit>();
     private Camera arCamera;
 
     void Awake()
     {
-        // Use new APIs to find managers
         if (xrOrigin == null)        xrOrigin        = Object.FindFirstObjectByType<XROrigin>();
         if (raycastManager == null)  raycastManager  = Object.FindAnyObjectByType<ARRaycastManager>();
         if (planeManager == null)    planeManager    = Object.FindAnyObjectByType<ARPlaneManager>();
         if (arCameraManager == null) arCameraManager = Object.FindAnyObjectByType<ARCameraManager>();
 
-        // Prefer XR Origin camera, fallback to Camera.main
         arCamera = (xrOrigin != null && xrOrigin.Camera != null) ? xrOrigin.Camera : Camera.main;
 
-        // Default parent to XR Origin
         if (modelParent == null && xrOrigin != null) modelParent = xrOrigin.transform;
 
-        // Optional helpful logs
         if (xrOrigin == null)        Debug.LogError("[ARModelLoader] Missing XROrigin in scene.");
         if (raycastManager == null)  Debug.LogWarning("[ARModelLoader] Missing ARRaycastManager (tap-to-place disabled).");
-        if (arCameraManager == null) Debug.LogWarning("[ARModelLoader] Missing ARCameraManager.");
-        if (arCamera == null)        Debug.LogWarning("[ARModelLoader] No AR camera found. Using Camera.main if present.");
+        if (arCamera == null)        Debug.LogWarning("[ARModelLoader] No AR camera found. Assign XR Origin camera or tag MainCamera.");
     }
 
     void Update()
     {
         if (currentModel == null) return;
 
-        // Tap-to-place on planes (mobile)
+        // Mobile touch
         if (tapToPlaceEnabled && Input.touchCount > 0)
         {
             var touch = Input.GetTouch(0);
             if (touch.phase == TouchPhase.Began && !IsPointerOverUI(touch.position))
-            {
                 TryPlaceAt(touch.position);
-            }
         }
 
 #if UNITY_EDITOR
-        // Tap-to-place with mouse (Editor)
+        // Editor mouse
         if (tapToPlaceEnabled && Input.GetMouseButtonDown(0))
         {
-            var pos = Input.mousePosition;
+            var pos = (Vector2)Input.mousePosition;
             if (!IsPointerOverUI(pos)) TryPlaceAt(pos);
         }
 
-        // Simple dev keyboard rotate
+        // Editor rotate shortcuts
         if (Input.GetKey(KeyCode.Q)) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime, Space.World);
         if (Input.GetKey(KeyCode.E)) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime, Space.World);
 #endif
     }
 
-    /// <summary>
-    /// Called by your Align flow when a GLTF/GLB has been instantiated.
-    /// </summary>
     public void SetCurrentModel(GameObject go)
     {
         if (go == null) { Debug.LogError("[ARModelLoader] SetCurrentModel received null."); return; }
 
-        // Destroy previous
         if (currentModel != null) Destroy(currentModel);
-
         currentModel = go;
 
-        // Parent & reset
         if (modelParent != null && go.transform.parent != modelParent)
             go.transform.SetParent(modelParent, false);
 
-        // Initial placement: 0.5 m in front of camera, facing forward
+        // Put it in front of camera so it's visible immediately
         if (arCamera != null)
         {
-            var forward = arCamera.transform.forward;
-            var origin  = arCamera.transform.position;
-            go.transform.position = origin + forward * 0.5f;
-            go.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
-        }
-        else
-        {
-            // Fallback to origin transform if camera missing
-            go.transform.localPosition = Vector3.zero;
-            go.transform.localRotation = Quaternion.identity;
+            var fwd = arCamera.transform.forward;
+            var pos = arCamera.transform.position + fwd * 0.5f;
+            go.transform.position = pos;
+            go.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
         }
 
-        // Initial scale per your summary
+        // Start small (STEP-derived models can be huge)
         go.transform.localScale = Vector3.one * 0.001f;
 
-        // Apply transparent material
-        ApplyTransparentMaterial(currentModel);
+        ApplyTransparentMaterial(go);
 
         Debug.Log("[ARModelLoader] Model assigned, placed in front of camera, and ready for placement.");
     }
 
-    /// <summary>
-    /// If you load prefabs from Resources.
-    /// </summary>
-    public void LoadFromResources(string resourcesPath)
-    {
-        var prefab = Resources.Load<GameObject>(resourcesPath);
-        if (prefab == null)
-        {
-            Debug.LogError($"Resources.Load failed: {resourcesPath}");
-            return;
-        }
-        // Instantiate a prefab and set as current
-        var go = Instantiate(prefab, modelParent);
-        SetCurrentModel(go);
-    }
-
-    /// <summary>
-    /// Tap-to-place: Try planes + feature points, then fallback to a virtual plane 0.5 m in front of camera.
-    /// </summary>
     public void TryPlaceAt(Vector2 screenPos)
     {
         if (currentModel == null || raycastManager == null || arCamera == null)
@@ -145,7 +105,7 @@ public class ARModelLoader : MonoBehaviour
 
         s_Hits.Clear();
 
-        // Try planes + feature points
+        // Planes + feature points
         var types = TrackableType.PlaneWithinPolygon | TrackableType.FeaturePoint;
         if (raycastManager.Raycast(screenPos, s_Hits, types))
         {
@@ -155,7 +115,7 @@ public class ARModelLoader : MonoBehaviour
             return;
         }
 
-        // Fallback: place on a virtual plane 0.5 m in front of camera
+        // Fallback plane 0.5m in front of camera
         var ray = arCamera.ScreenPointToRay(screenPos);
         var plane = new Plane(arCamera.transform.forward,
                               arCamera.transform.position + arCamera.transform.forward * 0.5f);
@@ -168,13 +128,18 @@ public class ARModelLoader : MonoBehaviour
         }
     }
 
-    // UI hooks for rotate/scale
+    // UI hooks
     public void RotateLeft()  { if (currentModel) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime * 10f, Space.World); }
     public void RotateRight() { if (currentModel) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime * 10f, Space.World); }
     public void ScaleUp()     { if (currentModel) currentModel.transform.localScale += Vector3.one * scaleStep; }
-    public void ScaleDown()   { if (currentModel) currentModel.transform.localScale  = Vector3.Max(currentModel.transform.localScale - Vector3.one * scaleStep, Vector3.one * 0.01f); }
+    public void ScaleDown()
+    {
+        if (!currentModel) return;
+        var s = currentModel.transform.localScale - Vector3.one * scaleStep;
+        currentModel.transform.localScale = Vector3.Max(s, Vector3.one * 0.01f);
+    }
 
-    // Patch A: selective UI blocking
+    // Patch A: block ONLY interactive UI
     private bool IsPointerOverUI(Vector2 screenPos)
     {
         if (EventSystem.current == null) return false;
@@ -192,26 +157,19 @@ public class ARModelLoader : MonoBehaviour
             if (go.GetComponent<Slider>()     != null) return true;
             if (go.GetComponent<Scrollbar>()  != null) return true;
         }
-        // Non-interactive Images/panels are allowed to pass through
         return false;
     }
 
     private void ApplyTransparentMaterial(GameObject go)
     {
-        if (transparentMaterial == null)
-        {
-            Debug.LogWarning("[ARModelLoader] Transparent material not assigned.");
-            return;
-        }
+        if (transparentMaterial == null) return;
 
         var renderers = go.GetComponentsInChildren<Renderer>(true);
         foreach (var r in renderers)
         {
             var mats = r.sharedMaterials;
             for (int i = 0; i < mats.Length; i++)
-            {
-                mats[i] = new Material(transparentMaterial); // clone
-            }
+                mats[i] = new Material(transparentMaterial);
             r.sharedMaterials = mats;
         }
     }
