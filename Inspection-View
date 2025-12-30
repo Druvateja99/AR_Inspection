@@ -233,6 +233,9 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     // Align 
     Text _alignModelName; 
     Toggle _alignConfirmedToggle; 
+    // NEW: cache images to disable raycastTarget when aligning
+    Image _alignCardImage;
+    Image _toggleRowImage;
 
     // Inspection 
     Text _inspectTitle, _inspectProgress, _inspectPointName, _inspectInstruction; 
@@ -270,7 +273,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         return Color.white; 
     } 
 
-    // ========================= NEW: Runtime AR/GLTF wiring =========================
+    // ========================= Runtime AR/GLTF wiring =========================
     RuntimeGltfLoader _loader;          // dynamic GLTF/GLB loader component in scene
     ARModelLoader _arLoader;            // AR helper (tap-to-place/rotate/scale)
     Material _transparentMat;           // Transparent material for CAD overlay
@@ -299,24 +302,39 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 
         BringOverlaysToFront(); 
 
-        // ===== NEW: hook runtime loader & AR helpers =====
+        // Hook runtime loader & AR helpers
         _loader   = UnityEngine.Object.FindAnyObjectByType<RuntimeGltfLoader>(); 
         _arLoader = UnityEngine.Object.FindAnyObjectByType<ARModelLoader>(); 
 
+        // Try to load TransparentCAD from Resources; if not present, create a URP or Standard transparent fallback
         _transparentMat = Resources.Load<Material>("TransparentCAD"); 
         if (_transparentMat == null) 
         { 
-            _transparentMat = new Material(Shader.Find("Standard")); 
-            _transparentMat.SetFloat("_Mode", 3); 
-            _transparentMat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha); 
-            _transparentMat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha); 
-            _transparentMat.SetInt("_ZWrite", 0); 
-            _transparentMat.DisableKeyword("_ALPHATEST_ON"); 
-            _transparentMat.EnableKeyword("_ALPHABLEND_ON"); 
-            _transparentMat.renderQueue = 3000; 
-            var c = _transparentMat.color; c.a = 0.4f; _transparentMat.color = c; 
+            // Prefer URP/Lit
+            var urpLit = Shader.Find("Universal Render Pipeline/Lit");
+            if (urpLit != null)
+            {
+                _transparentMat = new Material(urpLit);
+                // URP surface: 0=Opaque, 1=Transparent
+                _transparentMat.SetFloat("_Surface", 1f);
+                _transparentMat.SetFloat("_AlphaClip", 0f);
+                var c = _transparentMat.color; c.a = 0.4f; _transparentMat.color = c;
+                _transparentMat.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;
+            }
+            else
+            {
+                // Built-in Standard transparent
+                _transparentMat = new Material(Shader.Find("Standard")); 
+                _transparentMat.SetFloat("_Mode", 3); 
+                _transparentMat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha); 
+                _transparentMat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha); 
+                _transparentMat.SetInt("_ZWrite", 0); 
+                _transparentMat.DisableKeyword("_ALPHATEST_ON"); 
+                _transparentMat.EnableKeyword("_ALPHABLEND_ON"); 
+                _transparentMat.renderQueue = 3000; 
+                var c = _transparentMat.color; c.a = 0.4f; _transparentMat.color = c; 
+            }
         } 
-        // ================================================
 
         if (!forceLoginOnStart && PlayerPrefs.GetInt("is_logged_in", 0) == 1) 
             NavigateTo(ScreenId.Home, clearStack: true); 
@@ -422,13 +440,18 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         if (id == ScreenId.ModelOptions) RefreshModelOptions(); 
         if (id == ScreenId.Checklist)    RefreshChecklistUI(); 
 
-        // ===== NEW: load model in Align =====
+        // Load model in Align + make center pass clicks to AR
         if (id == ScreenId.Align) 
         { 
             RefreshAlignUI(); 
-            EnableARAlign(); 
+            EnableARAlign();
+            MakeAlignCenterClickable(true);
         } 
-        // ====================================
+        else
+        {
+            // Other screens: restore normal UI blocking
+            MakeAlignCenterClickable(false);
+        }
 
         if (id == ScreenId.Inspection) RefreshInspectionUI(); 
         if (id == ScreenId.Report)     RefreshReportUI(); 
@@ -673,7 +696,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 #endif 
     } 
 
-    // ===== NEW: copy selected file/folder into app sandbox (persistentDataPath) =====
+    // ===== copy selected file/folder into app sandbox =====
     string EnsureInSandbox(string originalPath)
     {
         try
@@ -682,7 +705,6 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 
             var ext = Path.GetExtension(originalPath).ToLowerInvariant();
 
-            // For .gltf (JSON + external .bin/textures), copy the entire source folder recursively
             if (ext == ".gltf")
             {
                 var srcDir = Path.GetDirectoryName(originalPath);
@@ -691,18 +713,14 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
                     Debug.LogError($"[Sandbox] Source dir missing for .gltf: {srcDir}");
                     return originalPath;
                 }
-
-                // Put under a folder named after the gltf file (without extension)
                 var dstDir = Path.Combine(Application.persistentDataPath, Path.GetFileNameWithoutExtension(originalPath));
                 DirectoryCopy(srcDir, dstDir, true);
-
                 var sandboxGltf = Path.Combine(dstDir, Path.GetFileName(originalPath));
                 Debug.Log($"[Sandbox] Copied .gltf folder to: {dstDir}");
                 return sandboxGltf;
             }
             else
             {
-                // For .glb (single file) or other single-file assets, copy the file
                 var dstFile = Path.Combine(Application.persistentDataPath, Path.GetFileName(originalPath));
                 File.Copy(originalPath, dstFile, overwrite: true);
                 Debug.Log($"[Sandbox] Copied file to: {dstFile}");
@@ -716,7 +734,6 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         }
     }
 
-    // Recursive directory copy helper
     static void DirectoryCopy(string sourceDirName, string destDirName, bool copySubDirs)
     {
         var dir = new DirectoryInfo(sourceDirName);
@@ -724,14 +741,12 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 
         Directory.CreateDirectory(destDirName);
 
-        // Copy files
         foreach (var file in dir.GetFiles())
         {
             string temppath = Path.Combine(destDirName, file.Name);
             file.CopyTo(temppath, true);
         }
 
-        // Copy subdirectories
         if (copySubDirs)
         {
             foreach (var subdir in dir.GetDirectories())
@@ -741,11 +756,9 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             }
         }
     }
-    // ==============================================================================
 
     void AddModelFromPath(string path, bool autoNavigateToOptions) 
     { 
-        // ===== NEW: ensure we store sandbox path in history =====
         var sandboxPath = EnsureInSandbox(path);
 
         var name = Path.GetFileNameWithoutExtension(path); 
@@ -754,7 +767,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         { 
             id          = id, 
             displayName = name, 
-            sourcePath  = sandboxPath,   // store sandboxed path
+            sourcePath  = sandboxPath, 
             lastUsed    = Persist.Now() 
         }; 
         Persist.UpsertModel(m); 
@@ -765,7 +778,6 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         if (autoNavigateToOptions) PushAndGo(ScreenId.ModelOptions); 
     } 
 
-    // Manual modal input (runtime stub)
     void ShowAddModelModal() 
     { 
         ShowModal("Add Model", "Runtime file picker will be added later (iPad Files app).\n\nFor now, enter a name + a reference path.", "CONTINUE", () => 
@@ -796,7 +808,6 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
                 var path = (pathInput.text ?? "").Trim(); 
                 if (string.IsNullOrEmpty(name)) { Toast("Model name required"); return; } 
 
-                // Sandbox copy even for typed path
                 var sandboxPath = string.IsNullOrEmpty(path) ? "(none)" : EnsureInSandbox(path);
 
                 var id = Persist.NewId("model"); 
@@ -1099,6 +1110,8 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         CreateTopBar(_alignPanel.transform, "ALIGN", true, () => GoBack(), null, null); 
         var card = CreateCard(_alignPanel.transform, "AlignCard", new Vector2(1020, 580)); 
         card.GetComponent<RectTransform>().anchoredPosition = new Vector2(0, -20); 
+        _alignCardImage = card.GetComponent<Image>(); // cache background image
+
         _alignModelName = CreateText(card.transform, "ModelName", "MODEL: —", 24, TextAnchor.UpperLeft, C_TEXT); 
         _alignModelName.rectTransform.anchorMin = new Vector2(0, 0.84f); 
         _alignModelName.rectTransform.anchorMax = new Vector2(1, 1); 
@@ -1120,6 +1133,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         trt.anchorMax = new Vector2(1, 0.32f); 
         trt.offsetMin = new Vector2(24, 0); 
         trt.offsetMax = new Vector2(-24, 0); 
+        _toggleRowImage = toggleRow.GetComponent<Image>(); // cache row image
 
         var toggleGO = new GameObject("AlignToggle", typeof(RectTransform), typeof(Toggle)); 
         toggleGO.transform.SetParent(toggleRow.transform, false); 
@@ -1180,7 +1194,26 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         _alignConfirmedToggle.isOn = false; 
     } 
 
-    // ===== NEW: Enable AR + load GLTF/GLB in Align =====
+    // Allow AR clicks to pass through the center background on Align
+    void MakeAlignCenterClickable(bool allowArClicks)
+    {
+        // Center card
+        if (_alignCardImage != null)
+        {
+            _alignCardImage.raycastTarget = !allowArClicks;
+            var c = _alignCardImage.color;
+            _alignCardImage.color = new Color(c.r, c.g, c.b, allowArClicks ? 0.20f : c.a); // make translucent when aligning
+        }
+        // Toggle row background
+        if (_toggleRowImage != null)
+        {
+            _toggleRowImage.raycastTarget = !allowArClicks;
+            var c = _toggleRowImage.color;
+            _toggleRowImage.color = new Color(c.r, c.g, c.b, allowArClicks ? 0.30f : c.a);
+        }
+    }
+
+    // ===== Enable AR + load GLTF/GLB in Align =====
     async void EnableARAlign()
     {
         if (_selectedModel == null)
@@ -1226,17 +1259,21 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
             return;
         }
 
-        // Make semi-transparent & hand off to AR placement
-        MakeTransparent(go, _transparentMat, 0.4f);
-        _arLoader.currentModel = go;
+        // Handoff to ARModelLoader: it applies TransparentCAD to all renderers and parents under XR Origin
+        _arLoader.SetCurrentModel(go);
 
-        go.transform.localPosition = Vector3.zero;
-        go.transform.localRotation = Quaternion.identity;
-        go.transform.localScale    = Vector3.one;
+        // Place immediately in front of camera so it's visible before tap-to-place
+        var cam = Camera.main;
+        if (cam != null)
+        {
+            go.transform.position = cam.transform.position + cam.transform.forward * 0.5f; // 0.5 m ahead
+            go.transform.rotation = Quaternion.LookRotation(cam.transform.forward, Vector3.up);
+        }
+        // STEP-derived GLBs can be huge; start small
+        go.transform.localScale = Vector3.one * 0.001f;
 
         Toast("Model loaded — tap to place, use rotate/scale");
     }
-    // ================================================
 
     // INSPECTION 
     void BuildInspectionScreen() 
@@ -1334,7 +1371,6 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         finrt.anchorMax = new Vector2(1.0f, 0.14f); 
         Stretch(finrt, 6, 18, 6, 6); 
 
-        // Wire logic 
         _inspectPassBtn.onClick.AddListener(() => 
         { 
             SetCurrentStepStatus(StepStatus.Pass); 
@@ -1853,7 +1889,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
         rt.anchoredPosition = new Vector2(marginX, marginY); 
     } 
 
-    // ===== Transparent helper =====
+    // ===== Transparent helper (still used by other flows) =====
     void MakeTransparent(GameObject go, Material mat, float alpha = 0.4f)
     {
         if (go == null || mat == null) return;
