@@ -3,6 +3,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.UI;
 using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
 using Unity.XR.CoreUtils;
@@ -32,28 +33,29 @@ public class ARModelLoader : MonoBehaviour
     void Awake()
     {
         // Use new APIs to find managers
-        if (xrOrigin == null)       xrOrigin       = Object.FindFirstObjectByType<XROrigin>();
-        if (raycastManager == null) raycastManager = Object.FindAnyObjectByType<ARRaycastManager>();
-        if (planeManager == null)   planeManager   = Object.FindAnyObjectByType<ARPlaneManager>();
+        if (xrOrigin == null)        xrOrigin        = Object.FindFirstObjectByType<XROrigin>();
+        if (raycastManager == null)  raycastManager  = Object.FindAnyObjectByType<ARRaycastManager>();
+        if (planeManager == null)    planeManager    = Object.FindAnyObjectByType<ARPlaneManager>();
         if (arCameraManager == null) arCameraManager = Object.FindAnyObjectByType<ARCameraManager>();
 
-        // Prefer XR Origin camera
-        arCamera = xrOrigin != null ? xrOrigin.Camera : Camera.main;
+        // Prefer XR Origin camera, fallback to Camera.main
+        arCamera = (xrOrigin != null && xrOrigin.Camera != null) ? xrOrigin.Camera : Camera.main;
 
         // Default parent to XR Origin
         if (modelParent == null && xrOrigin != null) modelParent = xrOrigin.transform;
 
         // Optional helpful logs
-        if (xrOrigin == null)       Debug.LogError("[ARModelLoader] Missing XROrigin in scene.");
-        if (raycastManager == null) Debug.LogWarning("[ARModelLoader] Missing ARRaycastManager (tap-to-place disabled).");
+        if (xrOrigin == null)        Debug.LogError("[ARModelLoader] Missing XROrigin in scene.");
+        if (raycastManager == null)  Debug.LogWarning("[ARModelLoader] Missing ARRaycastManager (tap-to-place disabled).");
         if (arCameraManager == null) Debug.LogWarning("[ARModelLoader] Missing ARCameraManager.");
+        if (arCamera == null)        Debug.LogWarning("[ARModelLoader] No AR camera found. Using Camera.main if present.");
     }
 
     void Update()
     {
         if (currentModel == null) return;
 
-        // Tap-to-place on planes
+        // Tap-to-place on planes (mobile)
         if (tapToPlaceEnabled && Input.touchCount > 0)
         {
             var touch = Input.GetTouch(0);
@@ -64,6 +66,13 @@ public class ARModelLoader : MonoBehaviour
         }
 
 #if UNITY_EDITOR
+        // Tap-to-place with mouse (Editor)
+        if (tapToPlaceEnabled && Input.GetMouseButtonDown(0))
+        {
+            var pos = Input.mousePosition;
+            if (!IsPointerOverUI(pos)) TryPlaceAt(pos);
+        }
+
         // Simple dev keyboard rotate
         if (Input.GetKey(KeyCode.Q)) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime, Space.World);
         if (Input.GetKey(KeyCode.E)) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime, Space.World);
@@ -86,14 +95,28 @@ public class ARModelLoader : MonoBehaviour
         if (modelParent != null && go.transform.parent != modelParent)
             go.transform.SetParent(modelParent, false);
 
-        go.transform.localPosition = Vector3.zero;
-        go.transform.localRotation = Quaternion.identity;
-        go.transform.localScale    = Vector3.one;
+        // Initial placement: 0.5 m in front of camera, facing forward
+        if (arCamera != null)
+        {
+            var forward = arCamera.transform.forward;
+            var origin  = arCamera.transform.position;
+            go.transform.position = origin + forward * 0.5f;
+            go.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
+        }
+        else
+        {
+            // Fallback to origin transform if camera missing
+            go.transform.localPosition = Vector3.zero;
+            go.transform.localRotation = Quaternion.identity;
+        }
+
+        // Initial scale per your summary
+        go.transform.localScale = Vector3.one * 0.001f;
 
         // Apply transparent material
         ApplyTransparentMaterial(currentModel);
 
-        Debug.Log("[ARModelLoader] Model assigned and ready for placement.");
+        Debug.Log("[ARModelLoader] Model assigned, placed in front of camera, and ready for placement.");
     }
 
     /// <summary>
@@ -113,18 +136,35 @@ public class ARModelLoader : MonoBehaviour
     }
 
     /// <summary>
-    /// Tap-to-place using ARRaycastManager.
+    /// Tap-to-place: Try planes + feature points, then fallback to a virtual plane 0.5 m in front of camera.
     /// </summary>
     public void TryPlaceAt(Vector2 screenPos)
     {
-        if (raycastManager == null || arCamera == null) return;
+        if (currentModel == null || raycastManager == null || arCamera == null)
+            return;
+
         s_Hits.Clear();
 
-        if (raycastManager.Raycast(screenPos, s_Hits, TrackableType.PlaneWithinPolygon))
+        // Try planes + feature points
+        var types = TrackableType.PlaneWithinPolygon | TrackableType.FeaturePoint;
+        if (raycastManager.Raycast(screenPos, s_Hits, types))
         {
             var hitPose = s_Hits[0].pose;
-            currentModel.transform.position = hitPose.position;
-            currentModel.transform.rotation = hitPose.rotation;
+            currentModel.transform.SetPositionAndRotation(hitPose.position, hitPose.rotation);
+            Debug.Log("[ARModelLoader] Placed on trackable at " + hitPose.position);
+            return;
+        }
+
+        // Fallback: place on a virtual plane 0.5 m in front of camera
+        var ray = arCamera.ScreenPointToRay(screenPos);
+        var plane = new Plane(arCamera.transform.forward,
+                              arCamera.transform.position + arCamera.transform.forward * 0.5f);
+        if (plane.Raycast(ray, out var enter))
+        {
+            var pos = ray.GetPoint(enter);
+            currentModel.transform.position = pos;
+            currentModel.transform.rotation = Quaternion.LookRotation(arCamera.transform.forward, Vector3.up);
+            Debug.Log("[ARModelLoader] Fallback placement at " + pos);
         }
     }
 
@@ -134,13 +174,26 @@ public class ARModelLoader : MonoBehaviour
     public void ScaleUp()     { if (currentModel) currentModel.transform.localScale += Vector3.one * scaleStep; }
     public void ScaleDown()   { if (currentModel) currentModel.transform.localScale  = Vector3.Max(currentModel.transform.localScale - Vector3.one * scaleStep, Vector3.one * 0.01f); }
 
+    // Patch A: selective UI blocking
     private bool IsPointerOverUI(Vector2 screenPos)
     {
         if (EventSystem.current == null) return false;
+
         var ed = new PointerEventData(EventSystem.current) { position = screenPos };
         var results = new List<RaycastResult>();
         EventSystem.current.RaycastAll(ed, results);
-        return results.Count > 0;
+
+        foreach (var r in results)
+        {
+            var go = r.gameObject;
+            if (go.GetComponent<Button>()     != null) return true;
+            if (go.GetComponent<Toggle>()     != null) return true;
+            if (go.GetComponent<InputField>() != null) return true;
+            if (go.GetComponent<Slider>()     != null) return true;
+            if (go.GetComponent<Scrollbar>()  != null) return true;
+        }
+        // Non-interactive Images/panels are allowed to pass through
+        return false;
     }
 
     private void ApplyTransparentMaterial(GameObject go)
