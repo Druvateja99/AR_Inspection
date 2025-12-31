@@ -230,12 +230,17 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     Transform _pointsContent; 
     Text _pointsCountText; 
 
-    // Align 
-    Text _alignModelName; 
-    Toggle _alignConfirmedToggle; 
-    // NEW: cache images to disable raycastTarget when aligning
+    // Align
+    Text _alignModelName;
+    Toggle _alignConfirmedToggle;
+
+    // Cache images to disable raycastTarget when aligning (HUD background)
     Image _alignCardImage;
     Image _toggleRowImage;
+
+    // NEW: bottom HUD rect
+    RectTransform _alignHudRT;
+
 
     // Inspection 
     Text _inspectTitle, _inspectProgress, _inspectPointName, _inspectInstruction; 
