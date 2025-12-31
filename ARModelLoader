@@ -8,6 +8,11 @@ using UnityEngine.XR.ARFoundation;
 using UnityEngine.XR.ARSubsystems;
 using Unity.XR.CoreUtils;
 
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.EnhancedTouch;
+#endif
+
 public class ARModelLoader : MonoBehaviour
 {
     [Header("AR Managers (assign from scene)")]
@@ -19,13 +24,24 @@ public class ARModelLoader : MonoBehaviour
     [Header("Model Loading")]
     public Transform modelParent;              // e.g., XROrigin.transform
     public Material transparentMaterial;       // optional
-    public GameObject currentModel;
+    public GameObject currentModel;            // NOTE: this will be the ROOT wrapper
 
     [Header("Placement & Alignment")]
     public bool tapToPlaceEnabled = true;
     public float rotateSpeed = 40f;            // degrees/sec
     public float scaleStep = 0.02f;            // per tap
 
+    [Header("Spawn Tuning")]
+    [Tooltip("If your CAD is in millimeters (STEP exports often are), keep this at 0.001. If your model is already meters, set to 1.")]
+    public float baseScale = 0.001f;
+
+    [Tooltip("Target visible size in meters when spawning (helps auto-fit to camera).")]
+    public float targetSizeMeters = 0.25f;     // ~25 cm
+
+    [Tooltip("Extra padding multiplier for camera fit distance.")]
+    public float fitPadding = 1.25f;
+
+    // Internal
     private static readonly List<ARRaycastHit> s_Hits = new List<ARRaycastHit>();
     private Camera arCamera;
 
@@ -40,17 +56,57 @@ public class ARModelLoader : MonoBehaviour
 
         if (modelParent == null && xrOrigin != null) modelParent = xrOrigin.transform;
 
-        if (xrOrigin == null)        Debug.LogError("[ARModelLoader] Missing XROrigin in scene.");
-        if (raycastManager == null)  Debug.LogWarning("[ARModelLoader] Missing ARRaycastManager (tap-to-place disabled).");
-        if (arCamera == null)        Debug.LogWarning("[ARModelLoader] No AR camera found. Assign XR Origin camera or tag MainCamera.");
+#if ENABLE_INPUT_SYSTEM
+        EnhancedTouchSupport.Enable();
+#endif
+
+        if (xrOrigin == null)       Debug.LogError("[ARModelLoader] Missing XROrigin in scene.");
+        if (raycastManager == null) Debug.LogWarning("[ARModelLoader] Missing ARRaycastManager (tap-to-place disabled).");
+        if (arCamera == null)       Debug.LogWarning("[ARModelLoader] No AR camera found. Assign XR Origin camera or tag MainCamera.");
+    }
+
+    void OnDestroy()
+    {
+#if ENABLE_INPUT_SYSTEM
+        EnhancedTouchSupport.Disable();
+#endif
     }
 
     void Update()
     {
         if (currentModel == null) return;
+        if (!tapToPlaceEnabled) return;
 
-        // Mobile touch
-        if (tapToPlaceEnabled && Input.touchCount > 0)
+        // ------------ Input handling (New Input System OR Legacy) ------------
+
+#if ENABLE_INPUT_SYSTEM
+        // Touch
+        if (UnityEngine.InputSystem.EnhancedTouch.Touch.activeTouches.Count > 0)
+        {
+            var t = UnityEngine.InputSystem.EnhancedTouch.Touch.activeTouches[0];
+            if (t.phase == UnityEngine.InputSystem.TouchPhase.Began)
+            {
+                Vector2 pos = t.screenPosition;
+                if (!IsPointerOverUI(pos)) TryPlaceAt(pos);
+            }
+        }
+
+        // Mouse (Editor/desktop)
+        if (Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
+        {
+            Vector2 pos = Mouse.current.position.ReadValue();
+            if (!IsPointerOverUI(pos)) TryPlaceAt(pos);
+        }
+
+        // Rotation hotkeys
+        if (Keyboard.current != null)
+        {
+            if (Keyboard.current.qKey.isPressed) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime, Space.World);
+            if (Keyboard.current.eKey.isPressed) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime, Space.World);
+        }
+#else
+        // Legacy touch
+        if (Input.touchCount > 0)
         {
             var touch = Input.GetTouch(0);
             if (touch.phase == TouchPhase.Began && !IsPointerOverUI(touch.position))
@@ -58,46 +114,59 @@ public class ARModelLoader : MonoBehaviour
         }
 
 #if UNITY_EDITOR
-        // Editor mouse
-        if (tapToPlaceEnabled && Input.GetMouseButtonDown(0))
+        // Legacy mouse (Editor)
+        if (Input.GetMouseButtonDown(0))
         {
             var pos = (Vector2)Input.mousePosition;
             if (!IsPointerOverUI(pos)) TryPlaceAt(pos);
         }
 
-        // Editor rotate shortcuts
+        // Legacy rotation keys
         if (Input.GetKey(KeyCode.Q)) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime, Space.World);
         if (Input.GetKey(KeyCode.E)) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime, Space.World);
 #endif
+#endif
     }
 
+    /// <summary>
+    /// Called when a GLTF/GLB has been instantiated.
+    /// This version wraps the model in a ROOT, recenters by renderer bounds,
+    /// and spawns it at a distance that fits the camera view.
+    /// </summary>
     public void SetCurrentModel(GameObject go)
     {
         if (go == null) { Debug.LogError("[ARModelLoader] SetCurrentModel received null."); return; }
 
+        // Destroy previous root
         if (currentModel != null) Destroy(currentModel);
-        currentModel = go;
 
-        if (modelParent != null && go.transform.parent != modelParent)
-            go.transform.SetParent(modelParent, false);
+        // Create wrapper root so we can recenter mesh without breaking placement
+        var root = new GameObject(go.name + "_Root");
+        if (modelParent != null)
+            root.transform.SetParent(modelParent, false);
 
-        // Put it in front of camera so it's visible immediately
-        if (arCamera != null)
-        {
-            var fwd = arCamera.transform.forward;
-            var pos = arCamera.transform.position + fwd * 0.5f;
-            go.transform.position = pos;
-            go.transform.rotation = Quaternion.LookRotation(fwd, Vector3.up);
-        }
+        // Parent the loaded model under root
+        go.transform.SetParent(root.transform, false);
 
-        // Start small (STEP-derived models can be huge)
-        go.transform.localScale = Vector3.one * 0.001f;
-
+        // Apply transparency to the CHILD model renderers (not root)
         ApplyTransparentMaterial(go);
 
-        Debug.Log("[ARModelLoader] Model assigned, placed in front of camera, and ready for placement.");
+        // Recenter child so its bounds center sits at root origin
+        RecenterChildToBounds(go, root.transform);
+
+        // Auto-scale + spawn in front of camera so it is visible immediately
+        SpawnRootFitToView(root.transform);
+
+        // Keep reference to ROOT
+        currentModel = root;
+
+        Debug.Log("[ARModelLoader] Model assigned, recentered, and spawned in view.");
     }
 
+    /// <summary>
+    /// Tap-to-place: Planes + feature points, then fallback virtual plane.
+    /// Moves the ROOT (currentModel).
+    /// </summary>
     public void TryPlaceAt(Vector2 screenPos)
     {
         if (currentModel == null || raycastManager == null || arCamera == null)
@@ -119,6 +188,7 @@ public class ARModelLoader : MonoBehaviour
         var ray = arCamera.ScreenPointToRay(screenPos);
         var plane = new Plane(arCamera.transform.forward,
                               arCamera.transform.position + arCamera.transform.forward * 0.5f);
+
         if (plane.Raycast(ray, out var enter))
         {
             var pos = ray.GetPoint(enter);
@@ -128,10 +198,22 @@ public class ARModelLoader : MonoBehaviour
         }
     }
 
-    // UI hooks
-    public void RotateLeft()  { if (currentModel) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime * 10f, Space.World); }
-    public void RotateRight() { if (currentModel) currentModel.transform.Rotate(Vector3.up,  rotateSpeed * Time.deltaTime * 10f, Space.World); }
-    public void ScaleUp()     { if (currentModel) currentModel.transform.localScale += Vector3.one * scaleStep; }
+    // UI hooks (operate on ROOT)
+    public void RotateLeft()
+    {
+        if (currentModel) currentModel.transform.Rotate(Vector3.up, -rotateSpeed * Time.deltaTime * 10f, Space.World);
+    }
+
+    public void RotateRight()
+    {
+        if (currentModel) currentModel.transform.Rotate(Vector3.up, rotateSpeed * Time.deltaTime * 10f, Space.World);
+    }
+
+    public void ScaleUp()
+    {
+        if (currentModel) currentModel.transform.localScale += Vector3.one * scaleStep;
+    }
+
     public void ScaleDown()
     {
         if (!currentModel) return;
@@ -139,7 +221,7 @@ public class ARModelLoader : MonoBehaviour
         currentModel.transform.localScale = Vector3.Max(s, Vector3.one * 0.01f);
     }
 
-    // Patch A: block ONLY interactive UI
+    // Block ONLY interactive UI (Buttons/Toggles/Inputs/etc.)
     private bool IsPointerOverUI(Vector2 screenPos)
     {
         if (EventSystem.current == null) return false;
@@ -172,5 +254,54 @@ public class ARModelLoader : MonoBehaviour
                 mats[i] = new Material(transparentMaterial);
             r.sharedMaterials = mats;
         }
+    }
+
+    // -------------------- NEW: Bounds recenter + camera fit --------------------
+
+    private void RecenterChildToBounds(GameObject childModel, Transform root)
+    {
+        var renderers = childModel.GetComponentsInChildren<Renderer>(true);
+        if (renderers == null || renderers.Length == 0) return;
+
+        Bounds b = renderers[0].bounds;
+        for (int i = 1; i < renderers.Length; i++)
+            b.Encapsulate(renderers[i].bounds);
+
+        // Move the child so bounds center aligns with root origin
+        Vector3 localCenter = root.InverseTransformPoint(b.center);
+        childModel.transform.localPosition -= localCenter;
+    }
+
+    private void SpawnRootFitToView(Transform root)
+    {
+        if (arCamera == null)
+            arCamera = (xrOrigin != null && xrOrigin.Camera != null) ? xrOrigin.Camera : Camera.main;
+
+        if (arCamera == null) return;
+
+        // Get bounds after recentering (renderers under root)
+        var renderers = root.GetComponentsInChildren<Renderer>(true);
+        if (renderers == null || renderers.Length == 0) return;
+
+        Bounds b = renderers[0].bounds;
+        for (int i = 1; i < renderers.Length; i++)
+            b.Encapsulate(renderers[i].bounds);
+
+        float maxSize = Mathf.Max(b.size.x, b.size.y, b.size.z);
+        if (maxSize < 0.00001f) maxSize = 0.01f;
+
+        // Scale so the model's largest dimension is ~targetSizeMeters
+        float scaleFactor = targetSizeMeters / maxSize;
+        root.localScale = Vector3.one * (baseScale * scaleFactor);
+
+        // Distance so it fits within camera vertical FOV
+        float radius = targetSizeMeters * 0.5f;
+        float fovRad = arCamera.fieldOfView * Mathf.Deg2Rad;
+        float dist = (radius / Mathf.Tan(fovRad * 0.5f)) * fitPadding;
+
+        dist = Mathf.Max(dist, arCamera.nearClipPlane + 0.25f);
+
+        root.position = arCamera.transform.position + arCamera.transform.forward * dist;
+        root.rotation = Quaternion.LookRotation(arCamera.transform.forward, Vector3.up);
     }
 }
