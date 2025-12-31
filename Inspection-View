@@ -1223,21 +1223,13 @@ void BuildAlignScreen()
     // Allow AR clicks to pass through the center background on Align
     void MakeAlignCenterClickable(bool allowArClicks)
     {
-        // Center card
-        if (_alignCardImage != null)
-        {
-            _alignCardImage.raycastTarget = !allowArClicks;
-            var c = _alignCardImage.color;
-            _alignCardImage.color = new Color(c.r, c.g, c.b, allowArClicks ? 0.20f : c.a); // make translucent when aligning
-        }
-        // Toggle row background
-        if (_toggleRowImage != null)
-        {
-            _toggleRowImage.raycastTarget = !allowArClicks;
-            var c = _toggleRowImage.color;
-            _toggleRowImage.color = new Color(c.r, c.g, c.b, allowArClicks ? 0.30f : c.a);
-        }
-    }
+    // Let AR taps pass through the HUD background while keeping Buttons/Toggle clickable.
+    if (_alignCardImage != null)
+        _alignCardImage.raycastTarget = !allowArClicks;
+
+    if (_toggleRowImage != null)
+        _toggleRowImage.raycastTarget = !allowArClicks;
+}
 
     // ===== Enable AR + load GLTF/GLB in Align =====
     async void EnableARAlign()
@@ -1285,21 +1277,16 @@ void BuildAlignScreen()
             return;
         }
 
-        // Handoff to ARModelLoader: it applies TransparentCAD to all renderers and parents under XR Origin
+        // Handoff to ARModelLoader: apply TransparentCAD and parent under XR Origin
+
+
+        _arLoader.transparentMaterial = _transparentMat;
+
+
         _arLoader.SetCurrentModel(go);
-
-        // Place immediately in front of camera so it's visible before tap-to-place
-        var cam = Camera.main;
-        if (cam != null)
-        {
-            go.transform.position = cam.transform.position + cam.transform.forward * 0.5f; // 0.5 m ahead
-            go.transform.rotation = Quaternion.LookRotation(cam.transform.forward, Vector3.up);
-        }
-        // STEP-derived GLBs can be huge; start small
-        go.transform.localScale = Vector3.one * 0.001f;
-
         Toast("Model loaded — tap to place, use rotate/scale");
-    }
+    
+}
 
     // INSPECTION 
     void BuildInspectionScreen() 
