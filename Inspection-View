@@ -282,6 +282,7 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     RuntimeGltfLoader _loader;          // dynamic GLTF/GLB loader component in scene
     ARModelLoader _arLoader;            // AR helper (tap-to-place/rotate/scale)
     Material _transparentMat;           // Transparent material for CAD overlay
+	RuntimeFilePicker _runtimePicker;   // iOS Files app picker bridge
     // ==============================================================================
 
     void Start() 
@@ -309,7 +310,15 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 
         // Hook runtime loader & AR helpers
         _loader   = UnityEngine.Object.FindAnyObjectByType<RuntimeGltfLoader>(); 
-        _arLoader = UnityEngine.Object.FindAnyObjectByType<ARModelLoader>(); 
+        _arLoader = UnityEngine.Object.FindAnyObjectByType<ARModelLoader>();
+		
+		// Hook runtime iOS file picker (GameObject must be named "RuntimeFilePicker")
+		_runtimePicker = UnityEngine.Object.FindAnyObjectByType<RuntimeFilePicker>();
+		if (_runtimePicker != null)
+			_runtimePicker.app = this;
+		else
+			Debug.LogWarning("[UI] RuntimeFilePicker not found in scene (iOS +ADD will not open Files picker).");
+
 
         // Try to load TransparentCAD from Resources; if not present, create a URP or Standard transparent fallback
         _transparentMat = Resources.Load<Material>("TransparentCAD"); 
@@ -686,20 +695,37 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
     } 
 
     // + ADD behavior: file picker in Editor, modal input otherwise 
-    void OnAddClicked() 
-    { 
-#if UNITY_EDITOR 
-        string path = EditorUtility.OpenFilePanel("Select CAD / Mesh File", "", "glb,gltf,obj,fbx,stl"); 
-        if (string.IsNullOrEmpty(path)) 
-        { 
-            Toast("No file selected"); 
-            return; 
-        } 
-        AddModelFromPath(path, autoNavigateToOptions: true); 
-#else 
-        ShowAddModelModal(); 
-#endif 
-    } 
+    
+	void OnAddClicked()
+	{
+	#if UNITY_EDITOR
+		string path = EditorUtility.OpenFilePanel("Select CAD / Mesh File", "", "glb,gltf,obj,fbx,stl");
+		if (string.IsNullOrEmpty(path))
+		{
+			Toast("No file selected");
+			return;
+		}
+		AddModelFromPath(path, autoNavigateToOptions: true);
+
+	#else
+		// iOS/iPadOS device: open Files app picker
+	#if UNITY_IOS
+		if (_runtimePicker == null)
+		{
+			Toast("File picker not found");
+			Debug.LogError("[UI] RuntimeFilePicker missing in scene. Create a GameObject named 'RuntimeFilePicker' and add RuntimeFilePicker component.");
+			return;
+		}
+
+		_runtimePicker.OpenPicker(); // opens iOS Files picker
+
+	#else
+		// Other platforms fallback
+		ShowAddModelModal();
+	#endif
+	#endif
+	}
+
 
     // ===== copy selected file/folder into app sandbox =====
     string EnsureInSandbox(string originalPath)
