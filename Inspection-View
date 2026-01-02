@@ -725,6 +725,20 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 	#endif
 	#endif
 	}
+	
+	// Called by RuntimeFilePicker after it copies file into persistentDataPath
+	public void AddModelFromRuntimePicker(string sandboxPath)
+	{
+		if (string.IsNullOrEmpty(sandboxPath) || !File.Exists(sandboxPath))
+		{
+			Toast("Picked file missing");
+			Debug.LogError("[UI] AddModelFromRuntimePicker: missing file: " + sandboxPath);
+			return;
+		}
+
+		// Reuse your existing pipeline (copies into sandbox again but safe; or just registers)
+		AddModelFromPath(sandboxPath, autoNavigateToOptions: true);
+	}
 
 
     // ===== copy selected file/folder into app sandbox =====
