@@ -1,0 +1,63 @@
+
+using System;
+using System.IO;
+using UnityEngine;
+using System.Runtime.InteropServices;
+
+public class RuntimeFilePicker : MonoBehaviour
+{
+#if UNITY_IOS && !UNITY_EDITOR
+    [DllImport("__Internal")] private static extern void PickGLBGLTF();
+#endif
+
+    // We will call back into your UI script after we copy into sandbox
+    public InspectionARApp_TWYN_JD_UGUI app;
+
+    public void OpenPicker()
+    {
+#if UNITY_IOS && !UNITY_EDITOR
+        PickGLBGLTF();
+#else
+        Debug.Log("[RuntimeFilePicker] iOS picker works only on iOS device build.");
+#endif
+    }
+
+    // Called by FilePicker.mm using UnitySendMessage
+    public void OnPickedFile(string urlString)
+    {
+        Debug.Log("[RuntimeFilePicker] Picked URL: " + urlString);
+
+        try
+        {
+            // Example: file:///var/mobile/.../something.glb
+            // Convert URL to local path
+            var uri = new Uri(urlString);
+            var path = uri.LocalPath;
+
+            if (!File.Exists(path))
+            {
+                Debug.LogError("[RuntimeFilePicker] File not found at: " + path);
+                return;
+            }
+
+            // Copy to persistentDataPath (your sandbox)
+            var dst = Path.Combine(Application.persistentDataPath, Path.GetFileName(path));
+            File.Copy(path, dst, true);
+
+            Debug.Log("[RuntimeFilePicker] Copied to sandbox: " + dst);
+
+            // Tell your UI script to add this model to history list
+            if (app != null)
+                app.AddModelFromRuntimePicker(dst);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("[RuntimeFilePicker] Copy failed: " + e.Message);
+        }
+    }
+
+    public void OnPickerCancelled(string _)
+    {
+        Debug.Log("[RuntimeFilePicker] Picker cancelled");
+    }
+}
