@@ -741,43 +741,70 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 	}
 
 
-    // ===== copy selected file/folder into app sandbox =====
-    string EnsureInSandbox(string originalPath)
-    {
-        try
-        {
-            if (string.IsNullOrEmpty(originalPath)) return originalPath;
 
-            var ext = Path.GetExtension(originalPath).ToLowerInvariant();
+	// ===== copy selected file/folder into app sandbox =====
+	string EnsureInSandbox(string originalPath)
+	{
+		try
+		{
+			if (string.IsNullOrEmpty(originalPath)) return originalPath;
 
-            if (ext == ".gltf")
-            {
-                var srcDir = Path.GetDirectoryName(originalPath);
-                if (string.IsNullOrEmpty(srcDir) || !Directory.Exists(srcDir))
-                {
-                    Debug.LogError($"[Sandbox] Source dir missing for .gltf: {srcDir}");
-                    return originalPath;
-                }
-                var dstDir = Path.Combine(Application.persistentDataPath, Path.GetFileNameWithoutExtension(originalPath));
-                DirectoryCopy(srcDir, dstDir, true);
-                var sandboxGltf = Path.Combine(dstDir, Path.GetFileName(originalPath));
-                Debug.Log($"[Sandbox] Copied .gltf folder to: {dstDir}");
-                return sandboxGltf;
-            }
-            else
-            {
-                var dstFile = Path.Combine(Application.persistentDataPath, Path.GetFileName(originalPath));
-                File.Copy(originalPath, dstFile, overwrite: true);
-                Debug.Log($"[Sandbox] Copied file to: {dstFile}");
-                return dstFile;
-            }
-        }
-        catch (Exception e)
-        {
-            Debug.LogError($"[Sandbox] Copy failed: {e.Message}");
-            return originalPath; // best effort fallback
-        }
-    }
+			// Normalize paths
+			string srcFull = Path.GetFullPath(originalPath);
+			string sandboxRoot = Path.GetFullPath(Application.persistentDataPath);
+
+			// ✅ If file is already inside persistentDataPath, DO NOT copy again.
+			// This avoids iOS "sharing violation" when source == destination.
+			if (srcFull.StartsWith(sandboxRoot, StringComparison.OrdinalIgnoreCase))
+			{
+				Debug.Log($"[Sandbox] Already in sandbox, skipping copy: {srcFull}");
+				return srcFull;
+			}
+
+			var ext = Path.GetExtension(srcFull).ToLowerInvariant();
+
+			// .gltf often needs its folder (textures/bin). Copy folder.
+			if (ext == ".gltf")
+			{
+				var srcDir = Path.GetDirectoryName(srcFull);
+				if (string.IsNullOrEmpty(srcDir) || !Directory.Exists(srcDir))
+				{
+					Debug.LogError($"[Sandbox] Source dir missing for .gltf: {srcDir}");
+					return srcFull;
+				}
+
+				var dstDir = Path.Combine(Application.persistentDataPath, Path.GetFileNameWithoutExtension(srcFull));
+				DirectoryCopy(srcDir, dstDir, true);
+
+				var sandboxGltf = Path.Combine(dstDir, Path.GetFileName(srcFull));
+				Debug.Log($"[Sandbox] Copied .gltf folder to: {dstDir}");
+				return sandboxGltf;
+			}
+			else
+			{
+				// Copy single-file types (.glb recommended)
+				var fileName = Path.GetFileName(srcFull);
+				var dstFile = Path.Combine(Application.persistentDataPath, fileName);
+
+				// ✅ If destination accidentally equals source, don't copy
+				if (Path.GetFullPath(dstFile).Equals(srcFull, StringComparison.OrdinalIgnoreCase))
+				{
+					Debug.Log($"[Sandbox] Source equals destination, skipping copy: {dstFile}");
+					return dstFile;
+				}
+
+				File.Copy(srcFull, dstFile, overwrite: true);
+				Debug.Log($"[Sandbox] Copied file to: {dstFile}");
+				return dstFile;
+			}
+		}
+		catch (Exception e)
+		{
+			Debug.LogError($"[Sandbox] Copy failed: {e.Message}");
+			return originalPath; // best effort fallback
+		}
+	}
+
 
     static void DirectoryCopy(string sourceDirName, string destDirName, bool copySubDirs)
     {
@@ -1150,114 +1177,114 @@ public class InspectionARApp_TWYN_JD_UGUI : MonoBehaviour
 
     // ALIGN 
 
-// ALIGN
-void BuildAlignScreen()
-{
-    _alignPanel = CreateScreen("AlignScreen");
-    CreateTopBar(_alignPanel.transform, "ALIGN", true, () => GoBack(), null, null);
+	// ALIGN
+	void BuildAlignScreen()
+	{
+		_alignPanel = CreateScreen("AlignScreen");
+		CreateTopBar(_alignPanel.transform, "ALIGN", true, () => GoBack(), null, null);
 
-    // --------- Bottom HUD (so AR view stays clear) ---------
-    var hud = CreatePanel(_alignPanel.transform, "AlignHUD", C_CARD, true);
-    AddBorder(hud, C_BORDER);
+		// --------- Bottom HUD (so AR view stays clear) ---------
+		var hud = CreatePanel(_alignPanel.transform, "AlignHUD", C_CARD, true);
+		AddBorder(hud, C_BORDER);
 
-    _alignHudRT = hud.GetComponent<RectTransform>();
-    _alignHudRT.anchorMin = new Vector2(0, 0.02f);
-    _alignHudRT.anchorMax = new Vector2(1, 0.28f);  // ~26% height HUD
-    _alignHudRT.offsetMin = new Vector2(20, 0);
-    _alignHudRT.offsetMax = new Vector2(-20, 0);
+		_alignHudRT = hud.GetComponent<RectTransform>();
+		_alignHudRT.anchorMin = new Vector2(0, 0.02f);
+		_alignHudRT.anchorMax = new Vector2(1, 0.28f);  // ~26% height HUD
+		_alignHudRT.offsetMin = new Vector2(20, 0);
+		_alignHudRT.offsetMax = new Vector2(-20, 0);
 
-    _alignCardImage = hud.GetComponent<Image>(); // cache HUD background
+		_alignCardImage = hud.GetComponent<Image>(); // cache HUD background
 
-    // Make HUD slightly translucent so model is visible behind it
-    var hudCol = _alignCardImage.color;
-    _alignCardImage.color = new Color(hudCol.r, hudCol.g, hudCol.b, 0.78f);
+		// Make HUD slightly translucent so model is visible behind it
+		var hudCol = _alignCardImage.color;
+		_alignCardImage.color = new Color(hudCol.r, hudCol.g, hudCol.b, 0.78f);
 
-    _alignModelName = CreateText(hud.transform, "ModelName", "MODEL: —", 22, TextAnchor.UpperLeft, C_TEXT);
-    _alignModelName.rectTransform.anchorMin = new Vector2(0, 0.70f);
-    _alignModelName.rectTransform.anchorMax = new Vector2(1, 1);
-    _alignModelName.rectTransform.offsetMin = new Vector2(18, 0);
-    _alignModelName.rectTransform.offsetMax = new Vector2(-18, -10);
+		_alignModelName = CreateText(hud.transform, "ModelName", "MODEL: —", 22, TextAnchor.UpperLeft, C_TEXT);
+		_alignModelName.rectTransform.anchorMin = new Vector2(0, 0.70f);
+		_alignModelName.rectTransform.anchorMax = new Vector2(1, 1);
+		_alignModelName.rectTransform.offsetMin = new Vector2(18, 0);
+		_alignModelName.rectTransform.offsetMax = new Vector2(-18, -10);
 
-    // Compact help (single line)
-    var help = CreateText(hud.transform, "Help",
-        "Tap to place • Use rotate/scale • Confirm aligned → Start Inspection",
-        18, TextAnchor.UpperLeft, C_SUB);
-    help.rectTransform.anchorMin = new Vector2(0, 0.46f);
-    help.rectTransform.anchorMax = new Vector2(1, 0.70f);
-    help.rectTransform.offsetMin = new Vector2(18, 0);
-    help.rectTransform.offsetMax = new Vector2(-18, 0);
+		// Compact help (single line)
+		var help = CreateText(hud.transform, "Help",
+			"Tap to place • Use rotate/scale • Confirm aligned → Start Inspection",
+			18, TextAnchor.UpperLeft, C_SUB);
+		help.rectTransform.anchorMin = new Vector2(0, 0.46f);
+		help.rectTransform.anchorMax = new Vector2(1, 0.70f);
+		help.rectTransform.offsetMin = new Vector2(18, 0);
+		help.rectTransform.offsetMax = new Vector2(-18, 0);
 
-    // Toggle row
-    var toggleRow = CreatePanel(hud.transform, "ToggleRow", Hex("#12171A"), true);
-    AddBorder(toggleRow, C_BORDER);
-    var trt = toggleRow.GetComponent<RectTransform>();
-    trt.anchorMin = new Vector2(0, 0.25f);
-    trt.anchorMax = new Vector2(1, 0.45f);
-    trt.offsetMin = new Vector2(18, 0);
-    trt.offsetMax = new Vector2(-18, 0);
-    _toggleRowImage = toggleRow.GetComponent<Image>(); // cache row image
+		// Toggle row
+		var toggleRow = CreatePanel(hud.transform, "ToggleRow", Hex("#12171A"), true);
+		AddBorder(toggleRow, C_BORDER);
+		var trt = toggleRow.GetComponent<RectTransform>();
+		trt.anchorMin = new Vector2(0, 0.25f);
+		trt.anchorMax = new Vector2(1, 0.45f);
+		trt.offsetMin = new Vector2(18, 0);
+		trt.offsetMax = new Vector2(-18, 0);
+		_toggleRowImage = toggleRow.GetComponent<Image>(); // cache row image
 
-    var toggleGO = new GameObject("AlignToggle", typeof(RectTransform), typeof(Toggle));
-    toggleGO.transform.SetParent(toggleRow.transform, false);
-    Stretch(toggleGO.GetComponent<RectTransform>(), 0, 0, 0, 0);
+		var toggleGO = new GameObject("AlignToggle", typeof(RectTransform), typeof(Toggle));
+		toggleGO.transform.SetParent(toggleRow.transform, false);
+		Stretch(toggleGO.GetComponent<RectTransform>(), 0, 0, 0, 0);
 
-    var box = new GameObject("Box", typeof(RectTransform), typeof(Image));
-    box.transform.SetParent(toggleGO.transform, false);
-    var brt = box.GetComponent<RectTransform>();
-    brt.anchorMin = new Vector2(0, 0.5f);
-    brt.anchorMax = new Vector2(0, 0.5f);
-    brt.sizeDelta = new Vector2(32, 32);
-    brt.anchoredPosition = new Vector2(18, 0);
-    box.GetComponent<Image>().color = Hex("#1E2528");
+		var box = new GameObject("Box", typeof(RectTransform), typeof(Image));
+		box.transform.SetParent(toggleGO.transform, false);
+		var brt = box.GetComponent<RectTransform>();
+		brt.anchorMin = new Vector2(0, 0.5f);
+		brt.anchorMax = new Vector2(0, 0.5f);
+		brt.sizeDelta = new Vector2(32, 32);
+		brt.anchoredPosition = new Vector2(18, 0);
+		box.GetComponent<Image>().color = Hex("#1E2528");
 
-    var mark = new GameObject("Mark", typeof(RectTransform), typeof(Image));
-    mark.transform.SetParent(box.transform, false);
-    Stretch(mark.GetComponent<RectTransform>(), 6, 6, 6, 6);
-    mark.GetComponent<Image>().color = C_ACCENT;
+		var mark = new GameObject("Mark", typeof(RectTransform), typeof(Image));
+		mark.transform.SetParent(box.transform, false);
+		Stretch(mark.GetComponent<RectTransform>(), 6, 6, 6, 6);
+		mark.GetComponent<Image>().color = C_ACCENT;
 
-    _alignConfirmedToggle = toggleGO.GetComponent<Toggle>();
-    _alignConfirmedToggle.targetGraphic = box.GetComponent<Image>();
-    _alignConfirmedToggle.graphic = mark.GetComponent<Image>();
-    _alignConfirmedToggle.isOn = false;
+		_alignConfirmedToggle = toggleGO.GetComponent<Toggle>();
+		_alignConfirmedToggle.targetGraphic = box.GetComponent<Image>();
+		_alignConfirmedToggle.graphic = mark.GetComponent<Image>();
+		_alignConfirmedToggle.isOn = false;
 
-    var tlabel = CreateText(toggleGO.transform, "Label", "ALIGNED TO PHYSICAL PART", 20, TextAnchor.MiddleLeft, C_TEXT);
-    tlabel.rectTransform.anchorMin = new Vector2(0, 0);
-    tlabel.rectTransform.anchorMax = new Vector2(1, 1);
-    tlabel.rectTransform.offsetMin = new Vector2(70, 0);
-    tlabel.rectTransform.offsetMax = new Vector2(-20, 0);
+		var tlabel = CreateText(toggleGO.transform, "Label", "ALIGNED TO PHYSICAL PART", 20, TextAnchor.MiddleLeft, C_TEXT);
+		tlabel.rectTransform.anchorMin = new Vector2(0, 0);
+		tlabel.rectTransform.anchorMax = new Vector2(1, 1);
+		tlabel.rectTransform.offsetMin = new Vector2(70, 0);
+		tlabel.rectTransform.offsetMax = new Vector2(-20, 0);
 
-    // Buttons bottom row (smaller + does not cover model)
-    var startBtn = CreateButton(hud.transform, "StartInspection", "START INSPECTION", C_SUCCESS, true);
-    var srt = startBtn.GetComponent<RectTransform>();
-    srt.anchorMin = new Vector2(0.52f, 0.03f);
-    srt.anchorMax = new Vector2(1, 0.23f);
-    Stretch(srt, 0, 0, 0, 0);
+		// Buttons bottom row (smaller + does not cover model)
+		var startBtn = CreateButton(hud.transform, "StartInspection", "START INSPECTION", C_SUCCESS, true);
+		var srt = startBtn.GetComponent<RectTransform>();
+		srt.anchorMin = new Vector2(0.52f, 0.03f);
+		srt.anchorMax = new Vector2(1, 0.23f);
+		Stretch(srt, 0, 0, 0, 0);
 
-    startBtn.onClick.AddListener(() =>
-    {
-        if (_selectedTemplate == null || _selectedTemplate.points.Count == 0)
-        {
-            Toast("Checklist empty");
-            PushAndGo(ScreenId.Checklist);
-            return;
-        }
-        if (!_alignConfirmedToggle.isOn)
-        {
-            Toast("Confirm alignment");
-            return;
-        }
-        BeginRun();
-        PushAndGo(ScreenId.Inspection);
-    });
+		startBtn.onClick.AddListener(() =>
+		{
+			if (_selectedTemplate == null || _selectedTemplate.points.Count == 0)
+			{
+				Toast("Checklist empty");
+				PushAndGo(ScreenId.Checklist);
+				return;
+			}
+			if (!_alignConfirmedToggle.isOn)
+			{
+				Toast("Confirm alignment");
+				return;
+			}
+			BeginRun();
+			PushAndGo(ScreenId.Inspection);
+		});
 
-    var backBtn = CreateButton(hud.transform, "BackToChecklist", "BACK TO CHECKLIST", Hex("#2A3338"), true);
-    var br = backBtn.GetComponent<RectTransform>();
-    br.anchorMin = new Vector2(0, 0.03f);
-    br.anchorMax = new Vector2(0.48f, 0.23f);
-    Stretch(br, 0, 0, 0, 0);
+		var backBtn = CreateButton(hud.transform, "BackToChecklist", "BACK TO CHECKLIST", Hex("#2A3338"), true);
+		var br = backBtn.GetComponent<RectTransform>();
+		br.anchorMin = new Vector2(0, 0.03f);
+		br.anchorMax = new Vector2(0.48f, 0.23f);
+		Stretch(br, 0, 0, 0, 0);
 
-    backBtn.onClick.AddListener(() => PushAndGo(ScreenId.Checklist));
-}
+		backBtn.onClick.AddListener(() => PushAndGo(ScreenId.Checklist));
+	}
 
     void RefreshAlignUI() 
     { 
@@ -1274,64 +1301,71 @@ void BuildAlignScreen()
 
     if (_toggleRowImage != null)
         _toggleRowImage.raycastTarget = !allowArClicks;
-}
+	}
 
     // ===== Enable AR + load GLTF/GLB in Align =====
-    async void EnableARAlign()
-    {
-        if (_selectedModel == null)
-        {
-            Toast("No model selected");
-            return;
-        }
-        if (_loader == null)
-        {
-            ShowModal("Loader missing", "RuntimeGltfLoader was not found in scene.", "OK", null);
-            return;
-        }
-        if (_arLoader == null)
-        {
-            ShowModal("AR loader missing", "ARModelLoader was not found in scene.", "OK", null);
-            return;
-        }
+	   
+	async void EnableARAlign()
+	{
+		try
+		{
+			if (_selectedModel == null)
+			{
+				Toast("No model selected");
+				return;
+			}
+			if (_loader == null)
+			{
+				ShowModal("Loader missing", "RuntimeGltfLoader was not found in scene.", "OK", null);
+				return;
+			}
+			if (_arLoader == null)
+			{
+				ShowModal("AR loader missing", "ARModelLoader was not found in scene.", "OK", null);
+				return;
+			}
 
-        var p = _selectedModel.sourcePath?.Trim() ?? "";
-        if (string.IsNullOrEmpty(p) || !File.Exists(p))
-        {
-            ShowModal("File missing",
-                      $"Cannot find:\n{p}\n\nTip: Re-add the model via +ADD so the app copies it into the sandbox.",
-                      "OK", null);
-            Debug.LogError($"[Align] Missing file: {p}");
-            return;
-        }
+			var p = _selectedModel.sourcePath?.Trim() ?? "";
+			if (string.IsNullOrEmpty(p) || !File.Exists(p))
+			{
+				ShowModal("File missing",
+						  $"Cannot find:\n{p}\n\nTip: Re-add the model via +ADD so the app copies it into the sandbox.",
+						  "OK", null);
+				Debug.LogError($"[Align] Missing file: {p}");
+				return;
+			}
 
-        var ext = Path.GetExtension(p).ToLowerInvariant();
-        if (ext != ".glb" && ext != ".gltf")
-        {
-            ShowModal("Unsupported file",
-                      $"Selected file:\n{p}\n\nPlease use .glb or .gltf for dynamic AR.",
-                      "OK", null);
-            return;
-        }
+			var ext = Path.GetExtension(p).ToLowerInvariant();
+			if (ext != ".glb" && ext != ".gltf")
+			{
+				ShowModal("Unsupported file",
+						  $"Selected file:\n{p}\n\nPlease use .glb or .gltf for dynamic AR.",
+						  "OK", null);
+				return;
+			}
 
-        Debug.Log($"[Align] Loading model: {p}");
-        var go = await _loader.LoadGltf(p, _arLoader.modelParent);
-        if (go == null)
-        {
-            ShowModal("Load Failed", "Could not load the GLTF/GLB model.", "OK", null);
-            return;
-        }
+			Debug.Log($"[Align] Loading model: {p}");
+			var go = await _loader.LoadGltf(p, _arLoader.modelParent);
+			if (go == null)
+			{
+				ShowModal("Load Failed", "Could not load the GLTF/GLB model.", "OK", null);
+				return;
+			}
 
-        // Handoff to ARModelLoader: apply TransparentCAD and parent under XR Origin
+			_arLoader.transparentMaterial = _transparentMat;
+			_arLoader.SetCurrentModel(go);
 
+			Toast("Model loaded — tap to place, use rotate/scale");
+		}
+		catch (Exception e)
+		{
+			Debug.LogError("[Align] Exception: " + e);
+			ShowModal("Align crash prevented",
+					  "Something failed while loading the model.\n\nCheck Xcode device logs for the exact error.",
+					  "OK", null);
+		}
+	}
 
-        _arLoader.transparentMaterial = _transparentMat;
-
-
-        _arLoader.SetCurrentModel(go);
-        Toast("Model loaded — tap to place, use rotate/scale");
-    
-}
 
     // INSPECTION 
     void BuildInspectionScreen() 
